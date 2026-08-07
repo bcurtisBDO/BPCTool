@@ -16,6 +16,27 @@
   margin-bottom: 8px;
 }
 
+.mode-banner {
+  margin: 10px 0 0;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.run-plan {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.plan-hint {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.workflow-card.planned {
+  border-color: var(--accent);
+}
+
 .panel {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -56,6 +77,61 @@ select {
   padding: 10px;
   background: var(--input-bg);
   color: var(--text-h);
+}
+
+.panel-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-heading-row h2 {
+  margin: 0;
+}
+
+.connection-pill {
+  flex-shrink: 0;
+}
+
+.connection-note {
+  grid-column: 1 / -1;
+  text-align: left;
+  font-size: 13px;
+}
+
+.connection-note p {
+  margin: 0 0 6px;
+}
+
+.pat-row,
+.fetch-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.pat-row input,
+.fetch-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.secondary-inline,
+.fetch-row button {
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--text-h);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fetch-row button.fetched-button {
+  border-color: #16a34a;
+  color: #16a34a;
 }
 
 .profile-actions {
@@ -155,9 +231,190 @@ select:disabled {
   color: #16a34a;
 }
 
-.status-chip.failed {
-  border-color: #dc2626;
+.status-chip.skipped {
+  border-color: #ca8a04;
+  color: #ca8a04;
+}
+
+.assessment-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.assessment-grid p {
+  margin: 0 0 6px;
+  text-align: left;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.section-lead {
+  margin: 0 0 12px;
+  font-size: 14px;
+  text-align: left;
+}
+
+.field-error {
   color: #dc2626;
+  margin-top: 4px;
+}
+
+.field-hint {
+  color: var(--text);
+  margin-top: 4px;
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.stack-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.name-policy-block {
+  margin-top: 14px;
+}
+
+.collapsible-trigger {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+.collapsible-trigger h2 {
+  margin: 0;
+}
+
+.collapse-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.collapse-caret {
+  color: var(--text-h);
+  font-size: 14px;
+}
+
+.collapsed-summary {
+  margin: 10px 0 0;
+  font-size: 13px;
+  text-align: left;
+}
+
+.collapsible-body {
+  margin-top: 12px;
+}
+
+.inventory-actions {
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+}
+
+.path-picker-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.path-picker-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+
+.modal-card {
+  width: min(560px, 100%);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-header h3 {
+  margin: 0;
+  color: var(--text-h);
+}
+
+.modal-help,
+.modal-note {
+  margin: 0;
+  font-size: 13px;
+  text-align: left;
+}
+
+.modal-note {
+  color: var(--text-h);
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.modal-actions .run-button {
+  margin-top: 0;
+}
+
+.plan-preview {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: left;
+  background: var(--input-bg);
+}
+
+.plan-preview h3 {
+  margin: 0 0 8px;
+  color: var(--text-h);
+}
+
+.plan-step-list {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.plan-step-list li {
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.plan-warnings {
+  color: #ca8a04;
+  padding-left: 18px;
+}
+
+.plan-errors {
+  color: #dc2626;
+  padding-left: 18px;
 }
 
 .input-list {

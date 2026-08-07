@@ -1,0 +1,225 @@
+"""Orchestrate IR → plan → apply/verify across engine steps."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any, Callable
+
+from .ado_client import AdoClient
+from .excel_ir import build_ir
+from .models import ApplyResult, DryRunRequest, DryRunResponse
+from .org_url import normalize_ado_org_url, parse_ado_org_url
+from .planner import STEP_ORDER, build_dry_run_plan
+from .writers import (
+    apply_backlog,
+    apply_catalog,
+    apply_layout,
+    apply_process,
+    apply_project,
+    apply_report,
+    apply_teams,
+)
+
+Emit = Callable[[dict[str, Any]], None]
+
+
+def _safe_part(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
+    return slug.strip("._-") or "ado"
+
+
+def default_output_dir(org_url: str, project_name: str) -> Path:
+    parsed = parse_ado_org_url(org_url)
+    org = parsed.org if parsed.ok else "org"
+    root = Path(__file__).resolve().parents[2] / "runner-out"
+    return root / _safe_part(f"{org}_{project_name}")
+
+
+def run_apply(
+    request: DryRunRequest,
+    *,
+    pat: str,
+    dry_run: bool,
+    emit: Emit | None = None,
+    step_filter: list[str] | None = None,
+    catalog_limit: int | None = None,
+) -> ApplyResult:
+    events: list[dict[str, Any]] = []
+
+    def _emit(event: dict[str, Any]) -> None:
+        events.append(event)
+        if emit:
+            emit(event)
+
+    def step_emit(step_id: str, message: str) -> None:
+        _emit({"type": "step-progress", "stepId": step_id, "message": message})
+
+    ir = build_ir(
+        request.excel_file,
+        catalog_source_dir=request.catalog_source_dir,
+        workbook_version=request.workbook_version,
+        process_name=request.process_name,
+        project_name=request.project_name,
+    )
+    plan = build_dry_run_plan(
+        ir,
+        update_policy=request.update_policy,
+        confirm_process_update=request.confirm_process_update,
+        confirm_project_update=request.confirm_project_update,
+        known_process_exists=request.known_process_exists,
+        known_project_exists=request.known_project_exists,
+    )
+    if not plan.ok:
+        return ApplyResult(
+            ok=False,
+            dry_run=dry_run,
+            plan=plan,
+            step_results={},
+            output_dir=None,
+            error="; ".join(plan.errors),
+            events=events,
+        )
+
+    org_url = normalize_ado_org_url(request.org_url)
+    output_dir = default_output_dir(org_url, request.project_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dry-run apply never calls Azure DevOps; client is only created for live apply.
+    client = None if dry_run else AdoClient(org_url, pat)
+    step_results: dict[str, Any] = {}
+    process_id: str | None = None
+
+    planned = {step["id"]: step for step in plan.steps}
+    selected = step_filter or STEP_ORDER
+
+    _emit({"type": "apply-started", "message": f"Starting {'dry-run apply' if dry_run else 'apply'}"})
+
+    try:
+        for step_id in selected:
+            step = planned.get(step_id)
+            if not step:
+                continue
+            action = step.get("planned_action")
+            if action == "skip":
+                step_results[step_id] = {"skipped": True}
+                _emit(
+                    {
+                        "type": "step-skipped",
+                        "stepId": step_id,
+                        "message": f"Skipped {step_id} by plan/policy",
+                    }
+                )
+                continue
+
+            _emit(
+                {
+                    "type": "step-started",
+                    "stepId": step_id,
+                    "message": f"Starting {step_id} ({action})",
+                }
+            )
+
+            if step_id == "process":
+                result = apply_process(client, ir, dry_run=dry_run, emit=step_emit)
+                process_id = result.get("process_id")
+                if not dry_run and client and not process_id:
+                    process_id = client.get_process_id(request.process_name)
+            elif step_id == "layout":
+                result = apply_layout(
+                    client, ir, dry_run=dry_run, emit=step_emit, process_id=process_id
+                )
+            elif step_id == "project":
+                result = apply_project(
+                    client, ir, dry_run=dry_run, emit=step_emit, process_id=process_id
+                )
+            elif step_id == "teams":
+                root = request.root_area_path or request.project_name
+                result = apply_teams(
+                    client, ir, dry_run=dry_run, emit=step_emit, root_area_path=root
+                )
+            elif step_id == "backlog":
+                result = apply_backlog(
+                    client, ir, dry_run=dry_run, emit=step_emit, process_id=process_id
+                )
+            elif step_id == "catalog":
+                result = apply_catalog(
+                    client,
+                    ir,
+                    dry_run=dry_run,
+                    emit=step_emit,
+                    output_dir=output_dir,
+                    limit=catalog_limit,
+                    convert_markdown_to_html=bool(request.convert_markdown_to_html),
+                )
+            elif step_id == "report":
+                result = apply_report(
+                    ir,
+                    step_results=step_results,
+                    output_dir=output_dir,
+                    org_url=org_url,
+                    emit=step_emit,
+                    dry_run=dry_run,
+                )
+            else:
+                result = {"skipped": True, "reason": f"Unknown step {step_id}"}
+
+            step_results[step_id] = result
+            _emit(
+                {
+                    "type": "step-completed",
+                    "stepId": step_id,
+                    "message": f"Finished {step_id}",
+                    "result": result,
+                }
+            )
+
+        # Ensure report exists even if filtered out mid-run
+        if "report" not in step_results and (not step_filter or "report" in selected):
+            step_results["report"] = apply_report(
+                ir,
+                step_results=step_results,
+                output_dir=output_dir,
+                org_url=org_url,
+                emit=step_emit,
+                dry_run=dry_run,
+            )
+
+        return ApplyResult(
+            ok=True,
+            dry_run=dry_run,
+            plan=plan,
+            step_results=step_results,
+            output_dir=str(output_dir),
+            error=None,
+            events=events,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _emit({"type": "job-error", "message": str(exc)})
+        return ApplyResult(
+            ok=False,
+            dry_run=dry_run,
+            plan=plan,
+            step_results=step_results,
+            output_dir=str(output_dir),
+            error=str(exc),
+            events=events,
+        )
+
+
+def plan_only(request: DryRunRequest) -> DryRunResponse:
+    ir = build_ir(
+        request.excel_file,
+        catalog_source_dir=request.catalog_source_dir,
+        workbook_version=request.workbook_version,
+        process_name=request.process_name,
+        project_name=request.project_name,
+    )
+    return build_dry_run_plan(
+        ir,
+        update_policy=request.update_policy,
+        confirm_process_update=request.confirm_process_update,
+        confirm_project_update=request.confirm_project_update,
+        known_process_exists=request.known_process_exists,
+        known_project_exists=request.known_project_exists,
+    )
