@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { localRunnerPlugin } from './scripts/localRunnerPlugin.js'
 
 const adoProxy = {
   '/ado-proxy': {
@@ -17,11 +18,13 @@ const adoProxy = {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), localRunnerPlugin()],
   server: {
+    open: true,
     proxy: adoProxy,
   },
   preview: {
+    open: true,
     proxy: adoProxy,
   },
   test: {

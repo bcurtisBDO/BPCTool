@@ -41,6 +41,7 @@ def run_dry_run(request: DryRunRequest) -> DryRunResponse:
         confirm_project_update=request.confirm_project_update,
         known_process_exists=request.known_process_exists,
         known_project_exists=request.known_project_exists,
+        step_filter=request.steps,
     )
 
 

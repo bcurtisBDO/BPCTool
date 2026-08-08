@@ -105,6 +105,9 @@ class AdoClient:
     def put(self, path: str, json_body: Any = None, **kwargs: Any) -> Any:
         return self.request("PUT", path, json_body=json_body, **kwargs)
 
+    def delete(self, path: str, **kwargs: Any) -> Any:
+        return self.request("DELETE", path, **kwargs)
+
     def list_processes(self) -> list[dict[str, Any]]:
         data = self.get("/_apis/work/processes", api_version="7.1-preview.2") or {}
         return list(data.get("value") or [])
@@ -152,13 +155,19 @@ class AdoClient:
                 return str(project.get("id"))
         return None
 
-    def create_project(self, project_name: str, process_id: str) -> str | None:
+    def create_project(
+        self,
+        project_name: str,
+        process_id: str,
+        *,
+        description: str = "",
+    ) -> str | None:
         existing = self.get_project_id(project_name)
         if existing:
             return existing
         payload = {
             "name": project_name,
-            "description": f"Project for process {process_id}",
+            "description": description or "",
             "capabilities": {
                 "versioncontrol": {"sourceControlType": "Git"},
                 "processTemplate": {"templateTypeId": process_id},
@@ -172,6 +181,13 @@ class AdoClient:
             if found:
                 return found
         return self.get_project_id(project_name)
+
+    def update_project_description(self, project_id: str, description: str) -> None:
+        self.patch(
+            f"/_apis/projects/{quote(project_id, safe='')}",
+            json_body={"description": description},
+            api_version="7.1-preview.4",
+        )
 
     def list_process_wits(self, process_id: str) -> list[dict[str, Any]]:
         data = (
@@ -226,6 +242,8 @@ class AdoClient:
             )
         if dry_run:
             return {"id": None, "workItemType": work_item_type, "patch": patch}
+        # ADO create-by-type URLs require a literal "$" before the type name
+        # (e.g. /workitems/$Bug). In Python f-strings "$" is literal; "{...}" interpolates.
         return self.request(
             "PATCH",
             f"/_apis/wit/workitems/${quote(work_item_type, safe='')}",

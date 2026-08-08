@@ -44,6 +44,7 @@ def build_dry_run_plan(
     confirm_project_update: bool,
     known_process_exists: bool | None,
     known_project_exists: bool | None,
+    step_filter: list[str] | None = None,
 ) -> DryRunResponse:
     errors: list[str] = []
     warnings: list[str] = []
@@ -55,21 +56,26 @@ def build_dry_run_plan(
 
     process_exists = bool(known_process_exists)
     project_exists = bool(known_project_exists)
+    selected = set(step_filter) if step_filter else set(STEP_ORDER)
+    touches_process = bool(selected & {"process", "layout"})
+    touches_project_create = "project" in selected
 
     # Policy gates (UI also validates; runner enforces).
+    # Scope confirmations to steps that will actually run so selected-step
+    # re-runs (e.g. teams-only) are not blocked by process/project confirms.
     if update_policy == "require-confirmation":
-        if process_exists and not confirm_process_update:
+        if process_exists and not confirm_process_update and touches_process:
             errors.append(
                 f'Process "{process_name}" already exists. Confirm update before planning process/layout applies.'
             )
-        if project_exists and not confirm_project_update:
+        if project_exists and not confirm_project_update and touches_project_create:
             errors.append(
                 f'Project "{project_name}" already exists. Confirm update before planning project-phase applies.'
             )
     if update_policy == "create-only":
-        if process_exists:
+        if process_exists and touches_process:
             errors.append(f'Process "{process_name}" already exists and policy is create-only.')
-        if project_exists:
+        if project_exists and touches_project_create:
             errors.append(f'Project "{project_name}" already exists and policy is create-only.')
 
     process_action = "update" if process_exists else "create"

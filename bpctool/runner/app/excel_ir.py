@@ -29,6 +29,14 @@ CATALOG_FILE_HINTS = (
     "sbd",
 )
 
+# Template / guideline workbooks must never be treated as catalog sources even if
+# their names contain "July" / "jul".
+CATALOG_EXCLUDE_HINTS = (
+    "ado template",
+    "template guideline",
+    "guideline",
+)
+
 
 def _cell(value: Any) -> str:
     if value is None:
@@ -200,38 +208,51 @@ def parse_iteration_paths(path: Path) -> list[dict[str, str]]:
 
 
 def parse_area_paths(path: Path) -> list[dict[str, Any]]:
+    """Parse Area paths sheet using July L1–L4 semantics.
+
+    Column A is the project-name placeholder (skipped). Columns B–E are
+    L1–L4 hierarchy; column F is Teams.
+    """
     rows = _sheet_rows(path, "Area paths")
     if len(rows) < 2:
         return []
 
-    # Sheet uses indented hierarchy across leading columns, with Teams in a later column.
     team_col = None
-    header = rows[0]
-    for index, value in enumerate(header):
+    for index, value in enumerate(rows[0]):
         if _cell(value).lower() == "teams":
             team_col = index
             break
+    # July uses B..E as L1..L4 (indexes 1..4) when the sheet has the standard layout.
+    if team_col is None:
+        team_col = 5
+    level_cols = list(range(1, team_col))[:4]
+    if not level_cols:
+        # Fallback: treat all columns before Teams as hierarchy (legacy).
+        level_cols = list(range(0, team_col))
 
     items: list[dict[str, Any]] = []
-    stack: list[str] = []
+    current: list[str] = []
     for row in rows[1:]:
-        depth = None
-        name = ""
-        # Find first non-empty cell among leading area columns (before team col).
-        limit = team_col if team_col is not None else min(len(row), 8)
-        for index in range(limit):
-            value = _cell(row[index]) if index < len(row) else ""
+        team = _cell(row[team_col]) if team_col < len(row) else ""
+        # Find the deepest level cell provided on this row.
+        filled_at = None
+        for offset, col in enumerate(level_cols):
+            value = _cell(row[col]) if col < len(row) else ""
             if value:
-                depth = index
-                name = value
-                break
-        if depth is None or not name:
+                # Truncate deeper levels when a shallower cell is set.
+                current = current[:offset]
+                current.append(value)
+                filled_at = offset
+        if filled_at is None or not current:
             continue
-        stack = stack[:depth]
-        stack.append(name)
-        path = "\\".join(stack)
-        team = _cell(row[team_col]) if team_col is not None and team_col < len(row) else ""
-        items.append({"path": path, "depth": depth, "team": team})
+        items.append(
+            {
+                "path": "\\".join(current),
+                "depth": filled_at,
+                "team": team,
+                "default_segment": current[filled_at],
+            }
+        )
     return items
 
 
@@ -283,6 +304,21 @@ def _looks_like_catalog(path: Path) -> bool:
     return any(hint in lowered for hint in CATALOG_FILE_HINTS)
 
 
+def is_catalog_source_file(path: Path) -> bool:
+    """True when an .xlsx in the catalog folder should be imported as catalog data.
+
+    Accepts names like ``Deliverables JUL 2026.xlsx`` (hint match). Rejects the
+    ADO template guideline workbook even when it sits in the same folder.
+    """
+    name = path.name
+    if not name.lower().endswith(".xlsx") or name.startswith("~$"):
+        return False
+    lowered = name.lower()
+    if any(hint in lowered for hint in CATALOG_EXCLUDE_HINTS):
+        return False
+    return _looks_like_catalog(path)
+
+
 def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
     if catalog_dir is None:
         return {"files": [], "total_rows": 0, "work_item_types": {}}
@@ -294,10 +330,8 @@ def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
     total_rows = 0
 
     for path in sorted(catalog_dir.glob("*.xlsx")):
-        if path.name.startswith("~$") or not _looks_like_catalog(path):
-            # Still accept any xlsx in the folder for JUL package sources.
-            if not path.name.lower().endswith(".xlsx"):
-                continue
+        if not is_catalog_source_file(path):
+            continue
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
             sheet_name = wb.sheetnames[0]
@@ -372,7 +406,23 @@ def build_ir(
     process_name: str = "",
     project_name: str = "",
 ) -> dict[str, Any]:
-    path = Path(excel_file).expanduser().resolve()
+    raw = Path(excel_file).expanduser()
+    if not excel_file or not str(excel_file).strip():
+        raise FileNotFoundError("Excel template path is empty.")
+    if not raw.is_absolute():
+        raise FileNotFoundError(
+            f'Excel template path must be absolute (got "{excel_file}"). '
+            "Use Browse… in the UI (local runner path picker) or paste a full path "
+            "such as /Users/you/.../ADO template guideline (July).xlsx — "
+            "browser dialogs alone often return only the folder/file name."
+        )
+    path = raw.resolve()
+    if path.is_dir():
+        raise FileNotFoundError(
+            f'Excel template must be an .xlsx file, not a folder: {path}. '
+            "Point Template workbook path at the guideline workbook; use Catalog source "
+            "folder for the BPC Files directory."
+        )
     if not path.exists():
         raise FileNotFoundError(f"Excel template not found: {path}")
     if path.suffix.lower() != ".xlsx":
@@ -387,7 +437,9 @@ def build_ir(
     )
     catalog = parse_catalog_sources(catalog_dir)
 
-    work_item_types = [item for item in parse_work_item_types(path) if not item["disabled"]]
+    # Keep disabled WITs in IR so process can disable them in ADO and backlog
+    # assignment can skip them (July Work item types sheet).
+    work_item_types = parse_work_item_types(path)
     fields = parse_fields(path)
     picklists = parse_picklists(path)
     iterations = parse_iteration_paths(path)
@@ -395,6 +447,8 @@ def build_ir(
     teams = parse_teams(path)
     backlogs = parse_backlogs(path)
     html_fields = [item for item in fields if item.get("is_html")]
+    enabled_wits = [item for item in work_item_types if not item.get("disabled")]
+    disabled_wits = [item for item in work_item_types if item.get("disabled")]
 
     return {
         "ir_version": IR_VERSION,
@@ -423,7 +477,8 @@ def build_ir(
         },
         "catalog": catalog,
         "counts": {
-            "work_item_types": len(work_item_types),
+            "work_item_types": len(enabled_wits),
+            "disabled_work_item_types": len(disabled_wits),
             "fields": len(fields),
             "html_fields": len(html_fields),
             "picklists": len(picklists),

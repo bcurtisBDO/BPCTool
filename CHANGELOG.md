@@ -1,11 +1,9 @@
-This file explains how Visual Studio created the project.
+# Changelog
 
-The following tools were used to generate this project:
-- create-vite
+Product documentation for BPCTool lives under [`bpctool/`](./bpctool/):
 
-The following steps were used to generate this project:
-- Create react project with create-vite: `npm init --yes vite@latest bpctool -- --template=react`.
-- Create project file (`bpctool.esproj`).
-- Create `launch.json` to enable debugging.
-- Add project to solution.
-- Write this file.
+- [`bpctool/CHANGELOG.md`](./bpctool/CHANGELOG.md) — feature and release history
+- [`bpctool/README.md`](./bpctool/README.md) — quick start
+- [`bpctool/USER_GUIDE.md`](./bpctool/USER_GUIDE.md) — full usage guide
+
+This root file previously described Visual Studio / create-vite project scaffolding only.

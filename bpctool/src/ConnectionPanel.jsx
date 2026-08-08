@@ -88,17 +88,17 @@ export default function ConnectionPanel({
             </select>
           </div>
 
-          <label>
+          <label className="field-span-full">
             Azure DevOps org URL
             <input
               value={orgUrl}
               onChange={(event) => onOrgUrlChange(event.target.value)}
-              placeholder="https://dev.azure.com/your-org or org name"
+              placeholder="https://dev.azure.com/org or https://org.visualstudio.com"
               disabled={disabled}
             />
           </label>
 
-          <label>
+          <label className="field-span-full">
             Personal access token
             <div className="pat-row">
               <input
@@ -107,6 +107,7 @@ export default function ConnectionPanel({
                 onChange={(event) => onPatChange(event.target.value)}
                 placeholder="PAT (session only, not saved)"
                 autoComplete="off"
+                spellCheck={false}
                 disabled={disabled}
               />
               <button
@@ -120,7 +121,7 @@ export default function ConnectionPanel({
             </div>
           </label>
 
-          <div className="fetch-row inventory-actions">
+          <div className="fetch-row inventory-actions field-span-full">
             <button
               type="button"
               className={projectsFetched ? 'fetched-button' : ''}
@@ -147,16 +148,16 @@ export default function ConnectionPanel({
             </button>
           </div>
 
-          <label>
+          <label className="field-span-full">
             Execution mode
             <select
               value={executionMode}
               onChange={(event) => onExecutionModeChange(event.target.value)}
               disabled={disabled}
             >
-              <option value="simulate">Simulate (local stubs)</option>
-              <option value="api">API (live ADO reads via proxy)</option>
               <option value="runner">Runner (local Excel→IR→apply engine)</option>
+              <option value="api">API (live ADO reads via proxy)</option>
+              <option value="simulate">Simulate (local stubs)</option>
             </select>
           </label>
 
@@ -165,8 +166,7 @@ export default function ConnectionPanel({
             <p>
               Profiles store org URL only. PAT stays in this browser session. Fetching existing
               projects/processes is optional and used to validate create vs update policy.
-              Runner mode talks to <code>npm run runner</code> and does not shell out to July
-              scripts.
+              The local apply engine starts automatically with the app — no separate terminal.
             </p>
           </div>
         </div>

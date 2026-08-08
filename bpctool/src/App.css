@@ -1,7 +1,8 @@
 .app-shell {
-  width: min(1100px, 100%);
+  width: min(1600px, calc(100% - 32px));
+  max-width: 100%;
   margin: 0 auto;
-  padding: 24px;
+  padding: 24px 16px 40px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -51,8 +52,66 @@
 
 .grid-2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px 16px;
+}
+
+.field-span-full {
+  grid-column: 1 / -1;
+}
+
+.grid-compact {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px 16px;
+}
+
+.grid-run-config {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px 16px;
+  align-items: start;
+}
+
+.grid-run-config > .span-12 {
+  grid-column: 1 / -1;
+}
+
+.grid-run-config > .span-8 {
+  grid-column: span 8;
+}
+
+.grid-run-config > .span-6 {
+  grid-column: span 6;
+}
+
+.grid-run-config > .span-4 {
+  grid-column: span 4;
+}
+
+.grid-run-config > .span-3 {
+  grid-column: span 3;
+}
+
+.grid-run-config > .span-2 {
+  grid-column: span 2;
+}
+
+@media (max-width: 1100px) {
+  .grid-run-config > .span-8,
+  .grid-run-config > .span-4 {
+    grid-column: span 6;
+  }
+}
+
+@media (max-width: 960px) {
+  .grid-run-config > .span-8,
+  .grid-run-config > .span-6,
+  .grid-run-config > .span-4,
+  .grid-run-config > .span-3,
+  .grid-run-config > .span-2 {
+    grid-column: 1 / -1;
+  }
 }
 
 label {
@@ -66,17 +125,28 @@ label {
 
 input,
 select,
+textarea,
 button {
   font: inherit;
 }
 
 input,
-select {
+select,
+textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px;
   background: var(--input-bg);
   color: var(--text-h);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.project-description-field {
+  margin-top: 12px;
 }
 
 .panel-heading-row {
@@ -106,16 +176,25 @@ select {
 }
 
 .pat-row,
-.fetch-row {
+.fetch-row,
+.path-picker-row {
   display: flex;
   gap: 8px;
   align-items: stretch;
+  width: 100%;
 }
 
 .pat-row input,
-.fetch-row select {
-  flex: 1;
+.fetch-row select,
+.path-picker-row input {
+  flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
+}
+
+.pat-row input {
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
 }
 
 .secondary-inline,
@@ -273,6 +352,17 @@ select:disabled {
   gap: 2px;
 }
 
+.dry-run-warning {
+  padding: 8px 10px;
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.dry-run-warning .field-hint {
+  color: #92400e;
+}
+
 .name-policy-block {
   margin-top: 14px;
 }
@@ -316,15 +406,17 @@ select:disabled {
   flex-wrap: wrap;
 }
 
-.path-picker-row {
+.run-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  align-items: stretch;
+  margin-top: 16px;
+  align-items: center;
 }
 
-.path-picker-row input {
-  flex: 1;
-  min-width: 0;
+.run-actions .run-button {
+  margin-top: 0;
+  margin-right: 0;
 }
 
 .modal-backdrop {
@@ -381,6 +473,80 @@ select:disabled {
 
 .modal-actions .run-button {
   margin-top: 0;
+}
+
+.path-picker-card {
+  width: min(640px, 100%);
+  max-height: min(85vh, 720px);
+}
+
+.path-picker-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.path-picker-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.path-picker-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  text-align: left;
+}
+
+.path-picker-list {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 240px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--input-bg);
+}
+
+.path-picker-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.path-picker-entry:last-child {
+  border-bottom: 0;
+}
+
+.path-picker-entry:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.path-picker-kind {
+  flex: 0 0 2.5rem;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.7;
+}
+
+.path-picker-error {
+  color: #b45309;
 }
 
 .plan-preview {
@@ -443,7 +609,8 @@ select:disabled {
 }
 
 .run-log {
-  margin-top: 12px;
+  margin-top: 16px;
+  width: 100%;
   border: 1px dashed var(--border);
   border-radius: 8px;
   padding: 10px;
@@ -458,7 +625,7 @@ select:disabled {
 
 .run-log pre {
   margin: 0;
-  max-height: 260px;
+  max-height: min(50vh, 420px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;

@@ -9,7 +9,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from .excel_ir import _cell, _looks_like_catalog
+from .excel_ir import _cell, is_catalog_source_file
 from .mapping import TemplateMapping, normalize
 from .richtext import normalize_field_value, normalize_rich_text
 
@@ -53,11 +53,8 @@ def load_catalog_drafts(
 
     drafts: list[WorkItemDraft] = []
     for path in sorted(root.glob("*.xlsx")):
-        if path.name.startswith("~$"):
+        if not is_catalog_source_file(path):
             continue
-        if not _looks_like_catalog(path) and "jul" not in path.name.lower():
-            # Accept all xlsx in the BPC Files folder.
-            pass
         drafts.extend(
             _drafts_from_workbook(
                 path, mapping, convert_markdown_to_html=convert_markdown_to_html

@@ -138,16 +138,27 @@ const throwIfAborted = (signal) => {
 }
 
 /**
- * Resolve which incomplete steps a run will execute.
- * Project never runs unless process + layout are already complete or included earlier in the plan.
+ * Resolve which steps a run will execute.
+ *
+ * - `step`: only the selected card (re-run even if already completed; no prerequisites)
+ * - `single`: dependency-aware run through the selected card (skips completed)
+ * - `full`: all incomplete steps in order
+ *
+ * For `single` / `full`, project-phase steps are withheld until process + layout
+ * are already complete or included earlier in the same plan.
  */
 export function resolveTargetSteps(mode, selectedWorkflowId, completedStepIds) {
   const completedSet = new Set(migrateCompletedStepIds(completedStepIds))
+
+  if (mode === 'step') {
+    return stepOrder.includes(selectedWorkflowId) ? [selectedWorkflowId] : []
+  }
 
   let candidates
   if (mode === 'full') {
     candidates = stepOrder.filter((stepId) => !completedSet.has(stepId))
   } else {
+    // Default / legacy: dependency-aware (`single`)
     const selectedIndex = stepOrder.indexOf(selectedWorkflowId)
     if (selectedIndex < 0) {
       return []

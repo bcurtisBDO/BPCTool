@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .excel_ir import build_ir
+from .fs_browser import list_directory, list_roots
 from .jobs import create_job, get_job, run_dry_run
 from .models import DryRunRequest, DryRunResponse, JobCreateRequest, JobStatusResponse
 
@@ -31,7 +32,17 @@ DEFAULT_CATALOG = Path("/Users/bill/BPC Files")
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # Include writer fingerprints so the UI/logs can detect a stale runner.
+    writers = Path(__file__).resolve().parent / "writers"
+    def _mtime(name: str) -> str:
+        path = writers / name
+        return str(int(path.stat().st_mtime)) if path.exists() else "missing"
+
+    return {
+        "status": "ok",
+        "teams_writer_mtime": _mtime("teams.py"),
+        "backlog_writer_mtime": _mtime("backlog.py"),
+    }
 
 
 @app.get("/defaults")
@@ -40,6 +51,26 @@ def defaults() -> dict[str, str | None]:
         "excel_file": str(DEFAULT_EXCEL) if DEFAULT_EXCEL.exists() else None,
         "catalog_source_dir": str(DEFAULT_CATALOG) if DEFAULT_CATALOG.exists() else None,
     }
+
+
+@app.get("/fs/roots")
+def fs_roots() -> dict:
+    return {"roots": list_roots()}
+
+
+@app.get("/fs/list")
+def fs_list(
+    path: str | None = Query(default=None),
+    directories_only: bool = Query(default=False),
+) -> dict:
+    try:
+        return list_directory(path, directories_only=directories_only)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/plan/dry-run", response_model=DryRunResponse)

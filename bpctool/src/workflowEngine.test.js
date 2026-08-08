@@ -18,7 +18,7 @@ const baseConfig = {
   maxRetries: 2,
   dryRun: true,
   layoutSheet: 'Page Layout',
-  rootAreaPath: 'Contoso-BPC\\Business Process Catalog',
+  rootAreaPath: 'Contoso-BPC',
   backlogSheet: 'Backlog Config',
   updatePolicy: 'always-update',
   knownProcesses: [],
@@ -97,6 +97,14 @@ describe('resolveTargetSteps', () => {
         workflowDefinitions.map((step) => step.id),
       ),
     ).toEqual([])
+  })
+
+  it('runs only the selected step in step mode even when already completed', () => {
+    expect(resolveTargetSteps('step', 'teams', ['process', 'layout', 'project', 'teams'])).toEqual([
+      'teams',
+    ])
+    expect(resolveTargetSteps('step', 'backlog', [])).toEqual(['backlog'])
+    expect(resolveTargetSteps('step', 'catalog', ['process'])).toEqual(['catalog'])
   })
 })
 

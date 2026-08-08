@@ -62,6 +62,9 @@ def run_apply(
         process_name=request.process_name,
         project_name=request.project_name,
     )
+    ir.setdefault("targets", {})["project_description"] = (
+        request.project_description or ""
+    ).strip()
     plan = build_dry_run_plan(
         ir,
         update_policy=request.update_policy,
@@ -69,6 +72,7 @@ def run_apply(
         confirm_project_update=request.confirm_project_update,
         known_process_exists=request.known_process_exists,
         known_project_exists=request.known_project_exists,
+        step_filter=step_filter,
     )
     if not plan.ok:
         return ApplyResult(

@@ -9,6 +9,10 @@ class DryRunRequest(BaseModel):
     org_url: str = Field(min_length=3)
     process_name: str = Field(min_length=3)
     project_name: str = Field(min_length=3)
+    project_description: str = Field(
+        default="",
+        description="Optional Azure DevOps project description set on create/update",
+    )
     excel_file: str = Field(min_length=3, description="Path to ADO template guideline .xlsx")
     catalog_source_dir: str | None = Field(
         default=None,

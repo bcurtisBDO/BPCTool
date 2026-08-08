@@ -1,22 +1,54 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
+
+async function fetchJson(url) {
+  const response = await fetch(url)
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(payload.detail || `Request failed (${response.status})`)
+  }
+  return payload
+}
 
 /**
- * Modal path picker for workbook files or folders.
- * Uses File System Access API when available; falls back to file input + typed path.
+ * Modal path picker backed by the local runner filesystem API.
+ * Browser pickers cannot expose absolute disk paths; the runner can.
  */
 export default function PathPickerModal({
   title = 'Select path',
   mode = 'file',
   initialValue = '',
-  accept = '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   onClose,
   onConfirm,
 }) {
   const titleId = useId()
-  const fileInputRef = useRef(null)
-  const folderInputRef = useRef(null)
   const [draft, setDraft] = useState(initialValue)
-  const [note, setNote] = useState('')
+  const [listing, setListing] = useState(null)
+  const [roots, setRoots] = useState([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const loadDir = async (path) => {
+    setLoading(true)
+    setError('')
+    try {
+      const params = new URLSearchParams()
+      if (path) {
+        params.set('path', path)
+      }
+      if (mode === 'folder') {
+        params.set('directories_only', 'true')
+      }
+      const data = await fetchJson(`/api/fs/list?${params}`)
+      setListing(data)
+      if (mode === 'folder') {
+        setDraft(data.path)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not list folder')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -24,75 +56,45 @@ export default function PathPickerModal({
         onClose()
       }
     }
-
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
-  const applyBrowserFile = (file) => {
-    if (!file) {
-      return
-    }
-
-    const maybePath = file.path || file.webkitRelativePath || file.name
-    setDraft(maybePath)
-    setNote(
-      file.path
-        ? 'Full path selected from the system dialog.'
-        : 'Browser provided a file name only. Edit the path if your runner needs a full disk location (for example C:\\templates\\guide.xlsx).',
-    )
-  }
-
-  const browseFile = async () => {
-    if (typeof window.showOpenFilePicker === 'function') {
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
       try {
-        const [handle] = await window.showOpenFilePicker({
-          multiple: false,
-          types: [
-            {
-              description: 'Excel workbook',
-              accept: {
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-              },
-            },
-          ],
-        })
-        const file = await handle.getFile()
-        applyBrowserFile(file)
-        return
-      } catch (error) {
-        if (error?.name === 'AbortError') {
-          return
+        const data = await fetchJson('/api/fs/roots')
+        if (!cancelled) {
+          setRoots(data.roots || [])
+        }
+      } catch {
+        if (!cancelled) {
+          setRoots([])
         }
       }
-    }
-
-    fileInputRef.current?.click()
-  }
-
-  const browseFolder = async () => {
-    if (typeof window.showDirectoryPicker === 'function') {
-      try {
-        const dir = await window.showDirectoryPicker()
-        setDraft(dir.name)
-        setNote(
-          `Folder selected: ${dir.name}. Enter the full folder path if needed, then append your workbook file name.`,
-        )
-        return
-      } catch (error) {
-        if (error?.name === 'AbortError') {
-          return
-        }
+      const start =
+        initialValue && (initialValue.startsWith('/') || /^[A-Za-z]:[\\/]/.test(initialValue))
+          ? initialValue
+          : ''
+      if (!cancelled) {
+        await loadDir(start)
       }
+    })()
+    return () => {
+      cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per open
+  }, [])
 
-    folderInputRef.current?.click()
-  }
+  const canConfirm =
+    Boolean(draft.trim()) &&
+    (mode === 'folder' || draft.trim().toLowerCase().endsWith('.xlsx'))
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div
-        className="modal-card"
+        className="modal-card path-picker-card"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -106,70 +108,111 @@ export default function PathPickerModal({
         </div>
 
         <p className="modal-help">
-          Choose a {mode === 'folder' ? 'folder' : 'workbook file'} with the system picker, or type
-          a full path for script execution.
+          Paths come from the local runner (absolute disk paths). Browser-only dialogs cannot
+          provide a full filesystem location.
         </p>
 
+        {roots.length > 0 ? (
+          <div className="path-picker-roots">
+            {roots.map((root) => (
+              <button
+                key={root.path}
+                type="button"
+                className="secondary-inline"
+                onClick={() => loadDir(root.path)}
+              >
+                {root.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="path-picker-nav">
+          <button
+            type="button"
+            className="secondary-inline"
+            disabled={!listing?.parent || loading}
+            onClick={() => loadDir(listing.parent)}
+          >
+            Up
+          </button>
+          <code className="path-picker-cwd">{listing?.path || '…'}</code>
+        </div>
+
+        <div className="path-picker-list" role="listbox" aria-label="Directory contents">
+          {loading ? <p className="modal-note">Loading…</p> : null}
+          {!loading && listing?.entries?.length === 0 ? (
+            <p className="modal-note">No matching items in this folder.</p>
+          ) : null}
+          {!loading
+            ? (listing?.entries || []).map((entry) => (
+                <button
+                  key={entry.path}
+                  type="button"
+                  className={`path-picker-entry ${entry.kind}`}
+                  onClick={() => {
+                    if (entry.kind === 'dir') {
+                      loadDir(entry.path)
+                      return
+                    }
+                    setDraft(entry.path)
+                  }}
+                  onDoubleClick={() => {
+                    if (entry.kind === 'dir') {
+                      loadDir(entry.path)
+                      return
+                    }
+                    onConfirm(entry.path)
+                  }}
+                >
+                  <span className="path-picker-kind">{entry.kind === 'dir' ? 'dir' : 'xlsx'}</span>
+                  <span>{entry.name}</span>
+                </button>
+              ))
+            : null}
+        </div>
+
         <label>
-          Path
+          {mode === 'folder' ? 'Selected folder path' : 'Selected workbook path'}
           <input
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             placeholder={
               mode === 'folder'
-                ? 'C:\\dev\\D365Patterns-MS\\templates\\Azure-DevOps-templates'
-                : 'C:\\dev\\...\\ADO template guideline (Preview).xlsx'
+                ? '/Users/you/BPC Files'
+                : '/Users/you/.../ADO template guideline (July).xlsx'
             }
             autoFocus
           />
         </label>
 
-        {note ? <p className="modal-note">{note}</p> : null}
+        {error ? <p className="modal-note path-picker-error">{error}</p> : null}
+        {mode === 'file' && draft && !draft.toLowerCase().endsWith('.xlsx') ? (
+          <p className="modal-note">
+            Template must be an <code>.xlsx</code> file (not a folder).
+          </p>
+        ) : null}
 
         <div className="modal-actions">
-          <button type="button" onClick={browseFile}>
-            Browse file…
-          </button>
-          <button type="button" className="secondary-inline" onClick={browseFolder}>
-            Browse folder…
-          </button>
+          {mode === 'folder' ? (
+            <button
+              type="button"
+              className="secondary-inline"
+              disabled={!listing?.path}
+              onClick={() => setDraft(listing.path)}
+            >
+              Use this folder
+            </button>
+          ) : null}
           <button
             type="button"
             className="run-button"
             onClick={() => onConfirm(draft.trim())}
-            disabled={!draft.trim()}
+            disabled={!canConfirm}
           >
             Use path
           </button>
         </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={accept}
-          hidden
-          onChange={(event) => applyBrowserFile(event.target.files?.[0])}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          {...{ webkitdirectory: '' }}
-          hidden
-          onChange={(event) => {
-            const first = event.target.files?.[0]
-            if (!first) {
-              return
-            }
-            const relative = first.webkitRelativePath || first.name
-            const folder = relative.includes('/')
-              ? relative.split('/').slice(0, -1).join('\\')
-              : relative
-            setDraft(folder)
-            setNote(
-              'Folder chosen from browser picker. Edit to a full absolute path if required by the runner.',
-            )
-          }}
-        />
       </div>
     </div>
   )

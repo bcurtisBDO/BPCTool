@@ -26,6 +26,7 @@ const SESSION_ORG_URL = 'bpcSessionOrgUrl'
 const SESSION_PAT = 'bpcSessionPat'
 const SESSION_PROFILE = 'bpcSessionProfile'
 const SESSION_PROJECT = 'bpcSessionProject'
+const SESSION_PROJECT_DESCRIPTION = 'bpcSessionProjectDescription'
 const SESSION_PROCESS = 'bpcSessionProcess'
 const SESSION_EXECUTION_MODE = 'bpcSessionExecutionMode'
 
@@ -55,6 +56,26 @@ const writeSession = (key, value) => {
   } catch {
     /* private mode / quota */
   }
+}
+
+const derivedRootAreaPath = (projectName) => (projectName || '').trim()
+
+/** True when empty or still equal to the project root (auto default). */
+const isAutoRootAreaPath = (path, projectName = '') => {
+  const trimmed = (path || '').trim()
+  if (!trimmed) {
+    return true
+  }
+  const project = (projectName || '').trim()
+  if (project && trimmed === project) {
+    return true
+  }
+  // Legacy auto-default from earlier builds: Project\\Business Process Catalog
+  const legacySuffix = '\\Business Process Catalog'
+  return (
+    trimmed === 'Business Process Catalog' ||
+    trimmed.endsWith(legacySuffix)
+  )
 }
 
 const buildCacheKey = (orgUrl, processName, projectName) => {
@@ -141,10 +162,10 @@ function App() {
   const [selectedWorkflowId, setSelectedWorkflowId] = useState(
     workflowDefinitions[0].id,
   )
-  const [runMode, setRunMode] = useState('single')
+  const [runMode, setRunMode] = useState('step')
   const [executionMode, setExecutionModeState] = useState(() => {
-    const stored = readSession(SESSION_EXECUTION_MODE, 'simulate')
-    return ['api', 'runner', 'simulate'].includes(stored) ? stored : 'simulate'
+    const stored = readSession(SESSION_EXECUTION_MODE, 'runner')
+    return ['api', 'runner', 'simulate'].includes(stored) ? stored : 'runner'
   })
   const [templatePath, setTemplatePath] = useState(
     '/Users/bill/dev/BPCTool/bpctool/fixtures/ADO template guideline (July).xlsx',
@@ -161,13 +182,19 @@ function App() {
   const [confirmProcessUpdate, setConfirmProcessUpdate] = useState(false)
   const [confirmProjectUpdate, setConfirmProjectUpdate] = useState(false)
   const [projectName, setProjectNameState] = useState(() => readSession(SESSION_PROJECT))
+  const [projectDescription, setProjectDescriptionState] = useState(() =>
+    readSession(SESSION_PROJECT_DESCRIPTION),
+  )
   const [processName, setProcessNameState] = useState(() => readSession(SESSION_PROCESS))
   const [threads, setThreads] = useState(4)
   const [maxRetries, setMaxRetries] = useState(2)
   const [layoutSheet, setLayoutSheet] = useState('Page Layout')
-  const [rootAreaPath, setRootAreaPath] = useState('')
+  // null = follow project name from section 2; string = user override
+  const [rootAreaPathOverride, setRootAreaPathOverride] = useState(null)
   const [backlogSheet, setBacklogSheet] = useState('Backlog Config')
-  const [dryRun, setDryRun] = useState(true)
+  // Live ADO apply by default in Runner mode. Use Preview plan for planning;
+  // check this only when you want writers to skip Azure DevOps mutations.
+  const [dryRun, setDryRun] = useState(false)
   const [convertMarkdownToHtml, setConvertMarkdownToHtml] = useState(false)
   const [runMessage, setRunMessage] = useState('No action run yet.')
   const [runLogs, setRunLogs] = useState([])
@@ -199,6 +226,9 @@ function App() {
   const isRunningRef = useRef(false)
   const abortControllerRef = useRef(null)
 
+  const rootAreaPath =
+    rootAreaPathOverride ?? derivedRootAreaPath(projectName)
+
   const loadRunnerDefaults = async () => {
     try {
       const response = await fetch('/api/defaults')
@@ -217,7 +247,7 @@ function App() {
       const message =
         error instanceof Error
           ? error.message
-          : 'Failed to reach local runner. Start it with npm run runner.'
+          : 'Failed to reach local runner. Quit and relaunch Start BPCTool (or npm start).'
       setRunMessage(`Could not load runner defaults: ${message}`)
     }
   }
@@ -247,9 +277,28 @@ function App() {
     setProjectNameState(value)
     writeSession(SESSION_PROJECT, value)
     setConfirmProjectUpdate(false)
-    if (value && !rootAreaPath) {
-      setRootAreaPath(`${value}\\Business Process Catalog`)
+    // If override still looks auto-derived from the previous project, drop it so
+    // the field follows the new project name from section 2.
+    if (
+      rootAreaPathOverride !== null &&
+      isAutoRootAreaPath(rootAreaPathOverride, projectName)
+    ) {
+      setRootAreaPathOverride(null)
     }
+  }
+
+  const setProjectDescription = (value) => {
+    setProjectDescriptionState(value)
+    writeSession(SESSION_PROJECT_DESCRIPTION, value)
+  }
+
+  const setRootAreaPathValue = (value) => {
+    const derived = derivedRootAreaPath(projectName)
+    if (!value.trim() || value.trim() === derived) {
+      setRootAreaPathOverride(null)
+      return
+    }
+    setRootAreaPathOverride(value)
   }
 
   const setProcessName = (value) => {
@@ -349,17 +398,32 @@ function App() {
     [selectedWorkflowId],
   )
 
+  const runModeLabel =
+    runMode === 'full'
+      ? 'Full flow'
+      : runMode === 'step'
+        ? 'Selected step only'
+        : 'Dependency-aware'
+
   const runPlanLabel = useMemo(() => {
     if (plannedStepIds.length === 0) {
-      return runMode === 'full'
-        ? 'Will run: nothing new (all steps already completed for this org/project).'
-        : 'Will run: nothing new (selected flow already completed for this org/project).'
+      if (runMode === 'full') {
+        return 'Will run: nothing new (all steps already completed for this org/project).'
+      }
+      if (runMode === 'step') {
+        return 'Will run: nothing (select a workflow card).'
+      }
+      return 'Will run: nothing new (selected flow already completed for this org/project). Use “Selected step only” to re-run a completed card.'
     }
 
     const titles = plannedStepIds.map((stepId) => {
       const step = workflowDefinitions.find((workflow) => workflow.id === stepId)
       return step?.title ?? stepId
     })
+
+    if (runMode === 'step') {
+      return `Will re-run only: ${titles[0]} (no prerequisite steps)`
+    }
 
     return `Will run: ${titles.join(' → ')}`
   }, [plannedStepIds, runMode])
@@ -589,7 +653,7 @@ function App() {
       const message =
         error instanceof Error
           ? error.message
-          : 'Failed to reach local runner. Start it with npm run runner.'
+          : 'Failed to reach local runner. Quit and relaunch Start BPCTool (or npm start).'
       setPlanError(message)
       setRunMessage(`Dry-run failed: ${message}`)
     } finally {
@@ -636,6 +700,7 @@ function App() {
       catalogSourceDir: catalogSourceDir.trim(),
       workbookVersion: workbookVersion.trim(),
       projectName: projectName.trim(),
+      projectDescription: projectDescription.trim(),
       processName: processName.trim(),
       threads: parseBoundedInt(threads, Number.NaN),
       maxRetries: parseBoundedInt(maxRetries, Number.NaN),
@@ -655,6 +720,14 @@ function App() {
 
     try {
       if (executionMode === 'runner') {
+        if (dryRun) {
+          addLog(
+            'Apply dry-run is ON — steps will report success without creating/updating anything in Azure DevOps. Uncheck it to apply for real.',
+          )
+        } else {
+          addLog('Live apply — runner will mutate Azure DevOps in the selected org.')
+        }
+
         const plannedSteps = resolveTargetSteps(runMode, selectedWorkflowId, completedStepIds)
         const job = await runRunnerJob(
           buildRunnerJobBody({
@@ -662,6 +735,7 @@ function App() {
             pat: runConfig.pat,
             processName: runConfig.processName,
             projectName: runConfig.projectName,
+            projectDescription: runConfig.projectDescription,
             templatePath: runConfig.templatePath,
             catalogSourceDir: runConfig.catalogSourceDir,
             workbookVersion: runConfig.workbookVersion,
@@ -688,7 +762,8 @@ function App() {
                 setStepStatus(stepId, 'running')
               }
               if (event.type === 'step-completed' && stepId) {
-                setStepStatus(stepId, 'completed')
+                // Dry-run must not look like a live completion in the workflow cards.
+                setStepStatus(stepId, dryRun ? 'skipped' : 'completed')
               }
               if (event.type === 'step-skipped' && stepId) {
                 setStepStatus(stepId, 'skipped')
@@ -708,25 +783,31 @@ function App() {
         )
         const applyOk = job.status === 'succeeded' && (job.apply_result?.ok ?? false)
         if (applyOk) {
-          const finished = Object.keys(job.apply_result?.step_results || {})
-          const nextCompleted = Array.from(new Set([...completedStepIds, ...finished]))
-          if (activeCacheKey) {
-            persistCompletionCache((previous) => ({
-              ...previous,
-              [activeCacheKey]: nextCompleted,
-            }))
-          }
-          if (finished.includes('process') && job.result?.workbook_fingerprint) {
-            persistWorkbookApply({
-              fingerprint: job.result.workbook_fingerprint,
-              processName: runConfig.processName,
-            })
+          // Never mark steps complete / record workbook apply for dry-run —
+          // otherwise dependency-aware runs skip real work next time.
+          if (!dryRun) {
+            const finished = Object.keys(job.apply_result?.step_results || {})
+            const nextCompleted = Array.from(new Set([...completedStepIds, ...finished]))
+            if (activeCacheKey) {
+              persistCompletionCache((previous) => ({
+                ...previous,
+                [activeCacheKey]: nextCompleted,
+              }))
+            }
+            if (finished.includes('process') && job.result?.workbook_fingerprint) {
+              persistWorkbookApply({
+                fingerprint: job.result.workbook_fingerprint,
+                processName: runConfig.processName,
+              })
+            }
           }
           setRunOverlay({ key: activeCacheKey, statuses: {} })
           const out = job.apply_result?.output_dir
           setRunMessage(
             dryRun
-              ? `Runner apply dry-run succeeded${out ? ` — artifacts in ${out}` : ''}.`
+              ? `Apply dry-run finished — no Azure DevOps changes were made${
+                  out ? ` (preview artifacts in ${out})` : ''
+                }. Uncheck “Apply dry-run” and run again to mutate the org.`
               : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.`,
           )
         } else {
@@ -813,7 +894,7 @@ function App() {
           setRunOverlay({ key: activeCacheKey, statuses: {} })
           setRunMessage(
             result.message ??
-              `Flow completed successfully in ${runMode === 'full' ? 'full' : 'dependency-aware'} mode (${executionMode}).`,
+              `Flow completed successfully in ${runModeLabel.toLowerCase()} mode (${executionMode}).`,
           )
         } else if (result.error?.code === 'ABORTED') {
           setRunOverlay((current) => {
@@ -875,7 +956,7 @@ function App() {
                 : 'simulation'}
           </strong>
           {executionMode === 'runner'
-            ? ' — local Excel→IR→apply engine (HTML + markdown catalog fields); start with npm run runner.'
+            ? ' — local Excel→IR→apply engine (started automatically with the app).'
             : executionMode === 'api'
               ? ' — live ADO reads via /ado-proxy (credential proof + inventory checks).'
               : ' — local timed stubs; use Runner mode for real apply.'}
@@ -914,6 +995,9 @@ function App() {
           [
             processName.trim() || 'No process name',
             projectName.trim() || 'No project name',
+            projectDescription.trim()
+              ? `Description (${projectDescription.trim().length} chars)`
+              : 'No description',
             updatePolicy,
           ].join(' · ')
         }
@@ -978,7 +1062,23 @@ function App() {
               </small>
             ) : null}
           </label>
+
         </div>
+
+        <label className="stack-field project-description-field">
+          Project description
+          <textarea
+            value={projectDescription}
+            onChange={(event) => setProjectDescription(event.target.value)}
+            placeholder="Optional description shown on the Azure DevOps project overview"
+            rows={3}
+            disabled={isRunning}
+          />
+          <small className="field-hint">
+            Applied on project create. If the project already exists, re-running Project
+            Creation updates the description when this field is non-empty.
+          </small>
+        </label>
 
         <div className="assessment-grid name-policy-block">
           <label>
@@ -1028,9 +1128,18 @@ function App() {
       <CollapsibleSection
         title="3. Workflow selection"
         defaultOpen
-        summary={`${runMode === 'full' ? 'Full flow' : 'Dependency-aware'} · ${runPlanLabel}`}
+        summary={`${runModeLabel} · ${runPlanLabel}`}
       >
         <div className="run-mode">
+          <label className="radio-row">
+            <input
+              type="radio"
+              checked={runMode === 'step'}
+              onChange={() => setRunMode('step')}
+              disabled={isRunning}
+            />
+            Selected step only (re-run; no prerequisites)
+          </label>
           <label className="radio-row">
             <input
               type="radio"
@@ -1059,10 +1168,11 @@ function App() {
             const isCachedSkip =
               completedStepIds.includes(workflow.id) &&
               (runMode === 'full' ||
-                workflowDefinitions.findIndex((item) => item.id === workflow.id) <=
-                  workflowDefinitions.findIndex(
-                    (item) => item.id === selectedWorkflowId,
-                  ))
+                (runMode === 'single' &&
+                  workflowDefinitions.findIndex((item) => item.id === workflow.id) <=
+                    workflowDefinitions.findIndex(
+                      (item) => item.id === selectedWorkflowId,
+                    )))
             const cardActive =
               runMode === 'full' ? isPlanned || isCachedSkip : selectedWorkflowId === workflow.id
 
@@ -1071,7 +1181,7 @@ function App() {
                 key={workflow.id}
                 type="button"
                 className={`workflow-card ${cardActive ? 'active' : ''} ${
-                  runMode === 'full' && isPlanned ? 'planned' : ''
+                  (runMode === 'full' || runMode === 'step') && isPlanned ? 'planned' : ''
                 }`}
                 onClick={() => {
                   if (runMode === 'full') {
@@ -1090,6 +1200,9 @@ function App() {
                 </strong>
                 <span>{workflow.script}</span>
                 <small>{workflow.description}</small>
+                {runMode === 'step' && isPlanned ? (
+                  <small className="plan-hint">Will re-run alone</small>
+                ) : null}
                 {runMode === 'full' && isCachedSkip && !isPlanned ? (
                   <small className="plan-hint">Cached — will skip</small>
                 ) : null}
@@ -1104,8 +1217,8 @@ function App() {
 
       <section className="panel">
         <h2>4. Run configuration</h2>
-        <div className="grid-2">
-          <label>
+        <div className="grid-run-config">
+          <label className="span-12">
             Template workbook path
             <div className="path-picker-row">
               <input
@@ -1125,8 +1238,12 @@ function App() {
                 Browse…
               </button>
             </div>
+            <small className="field-hint">
+              Absolute path to the ADO template guideline <code>.xlsx</code> (not the catalog
+              folder). Use Browse… or Load runner defaults.
+            </small>
           </label>
-          <label>
+          <label className="span-12">
             Catalog source folder
             <div className="path-picker-row">
               <input
@@ -1144,8 +1261,12 @@ function App() {
                 Browse…
               </button>
             </div>
+            <small className="field-hint">
+              Absolute path to the folder of catalog workbooks (e.g.{' '}
+              <code>/Users/bill/BPC Files</code>).
+            </small>
           </label>
-          <label>
+          <label className="span-4">
             Workbook version / revision label
             <input
               value={workbookVersion}
@@ -1157,8 +1278,8 @@ function App() {
               disabled={isRunning}
             />
           </label>
-          <label>
-            Threads (for layout step)
+          <label className="span-2">
+            Threads
             <input
               type="number"
               min="1"
@@ -1170,7 +1291,7 @@ function App() {
               disabled={isRunning}
             />
           </label>
-          <label>
+          <label className="span-2">
             Retry count
             <input
               type="number"
@@ -1183,7 +1304,7 @@ function App() {
               disabled={isRunning}
             />
           </label>
-          <label>
+          <label className="span-4">
             Layout worksheet name
             <input
               value={layoutSheet}
@@ -1191,16 +1312,22 @@ function App() {
               disabled={isRunning}
             />
           </label>
-          <label>
+          <label className="span-8">
             Root area path
             <input
               value={rootAreaPath}
-              onChange={(event) => setRootAreaPath(event.target.value)}
-              placeholder="Project\\Business Process Catalog"
+              onChange={(event) => setRootAreaPathValue(event.target.value)}
+              placeholder={derivedRootAreaPath(projectName) || 'Project name'}
               disabled={isRunning}
             />
+            <small className="field-hint">
+              Defaults to the project root (
+              <code>{derivedRootAreaPath(projectName) || 'project name'}</code>
+              ) from section 2. Area path children come from the Excel Area paths
+              sheet. Edit only to override.
+            </small>
           </label>
-          <label>
+          <label className="span-4">
             Backlog worksheet name
             <input
               value={backlogSheet}
@@ -1208,18 +1335,29 @@ function App() {
               disabled={isRunning}
             />
           </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={dryRun}
-              onChange={(event) => setDryRun(event.target.checked)}
-              disabled={isRunning}
-            />
-            {executionMode === 'runner'
-              ? 'Apply dry-run (plan writers, no ADO mutations)'
-              : 'Dry-run backlog configuration'}
-          </label>
-          <div className="stack-field">
+          <div
+            className={`stack-field span-6 ${executionMode === 'runner' && dryRun ? 'dry-run-warning' : ''}`}
+          >
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={dryRun}
+                onChange={(event) => setDryRun(event.target.checked)}
+                disabled={isRunning}
+              />
+              {executionMode === 'runner'
+                ? 'Apply dry-run (no Azure DevOps changes)'
+                : 'Dry-run backlog configuration'}
+            </label>
+            {executionMode === 'runner' ? (
+              <small className="field-hint">
+                {dryRun
+                  ? 'Checked: Run will parse/plan only and mark steps without creating the process/layouts in your org. Uncheck to apply for real.'
+                  : 'Unchecked: Run will create/update process, layouts, and later steps in the connected Azure DevOps org.'}
+              </small>
+            ) : null}
+          </div>
+          <div className="stack-field span-6">
             <label className="checkbox-row">
               <input
                 type="checkbox"
@@ -1234,7 +1372,7 @@ function App() {
               multilineFieldsFormat=Markdown. Enable only to store HTML instead.
             </small>
           </div>
-          <div className="input-list">
+          <div className="input-list span-12">
             <p>Workflow-specific inputs</p>
             <ul>
               {(selectedWorkflow?.inputs ?? []).map((inputName) => (
@@ -1244,54 +1382,56 @@ function App() {
           </div>
         </div>
 
-        <button
-          type="button"
-          className="run-button secondary"
-          onClick={loadRunnerDefaults}
-          disabled={isRunning || planLoading}
-        >
-          Load runner defaults
-        </button>
+        <div className="run-actions">
+          <button
+            type="button"
+            className="run-button secondary"
+            onClick={loadRunnerDefaults}
+            disabled={isRunning || planLoading}
+          >
+            Load runner defaults
+          </button>
 
-        <button
-          type="button"
-          className="run-button"
-          onClick={previewPlan}
-          disabled={planLoading || isRunning || !connectionReady || !nameValidation.ok}
-        >
-          {planLoading ? 'Building plan...' : 'Preview plan (dry-run)'}
-        </button>
+          <button
+            type="button"
+            className="run-button"
+            onClick={previewPlan}
+            disabled={planLoading || isRunning || !connectionReady || !nameValidation.ok}
+          >
+            {planLoading ? 'Building plan...' : 'Preview plan (dry-run)'}
+          </button>
 
-        <button
-          type="button"
-          className="run-button"
-          onClick={runWorkflow}
-          disabled={
-            isRunning ||
-            !connectionReady ||
-            !nameValidation.ok
-          }
-        >
-          {isRunning ? 'Running...' : 'Run selected flow'}
-        </button>
+          <button
+            type="button"
+            className="run-button"
+            onClick={runWorkflow}
+            disabled={
+              isRunning ||
+              !connectionReady ||
+              !nameValidation.ok
+            }
+          >
+            {isRunning ? 'Running...' : 'Run selected flow'}
+          </button>
 
-        <button
-          type="button"
-          className="run-button secondary"
-          onClick={cancelWorkflow}
-          disabled={!isRunning}
-        >
-          Cancel run
-        </button>
+          <button
+            type="button"
+            className="run-button secondary"
+            onClick={cancelWorkflow}
+            disabled={!isRunning}
+          >
+            Cancel run
+          </button>
 
-        <button
-          type="button"
-          className="run-button secondary"
-          onClick={clearCompletionCache}
-          disabled={isRunning}
-        >
-          Clear completion cache
-        </button>
+          <button
+            type="button"
+            className="run-button secondary"
+            onClick={clearCompletionCache}
+            disabled={isRunning}
+          >
+            Clear completion cache
+          </button>
+        </div>
 
         {planError ? <p className="field-error">{planError}</p> : null}
 
@@ -1347,7 +1487,7 @@ function App() {
           title={
             pathPickerTarget === 'catalog'
               ? 'Select catalog source folder'
-              : 'Select template workbook or folder'
+              : 'Select template workbook (.xlsx)'
           }
           mode={pathPickerMode}
           initialValue={
