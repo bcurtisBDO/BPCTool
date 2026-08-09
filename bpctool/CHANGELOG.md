@@ -2,6 +2,17 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Reference: post-create process analysis
+
+- Added [`docs/reference/MSBPC-Jul26-analysis.md`](./docs/reference/MSBPC-Jul26-analysis.md) — WIT/states/fields snapshot of process `MSBPCTemplate` after template apply
+
+## 2026-08 — Repo root cleanup
+
+- Removed Visual Studio scaffold (`BPCTool.sln`, `bpctool.esproj`), empty root `package-lock.json`, and tracked `.DS_Store`
+- Slimmed root `.gitignore` / `.gitattributes` for Node + Python
+- Single changelog: this file; root [`README.md`](../README.md) is the repo entry point
+- Retired `DEPRECATIONS.md` (notes folded here / USER_GUIDE §17)
+
 ## 2026-08 — Template not bundled; scaffold cleanup
 
 - ADO **template guideline** `.xlsx` is user-supplied (removed `fixtures/`); `/defaults` may discover it via `BPCTOOL_TEMPLATE` or under the catalog folder
@@ -170,6 +181,13 @@ API surface:
 - In-memory jobs only (lost on runner restart)
 - UI cancel stops client polling; does not always kill an in-flight apply thread
 - Large catalog imports (~15k rows across all matching workbooks) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests
+
+### Optional surfaces still wired (not primary path)
+
+- **Simulate** / **API** execution modes (stubs / ADO reads); Runner is the apply path
+- UI fields `threads`, `maxRetries`, `layoutSheet`, `backlogSheet` (Simulate/API only)
+- `POST /ir/parse` (manual API; UI does not call it)
+- `npm run runner` / `runner:install` (prefer `npm start` + Vite plugin)
 
 ---
 

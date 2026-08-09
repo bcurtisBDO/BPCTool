@@ -695,6 +695,7 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - Job store is in-memory; restarting the runner clears job history
 - Cancel in the UI stops client polling; it does not always hard-kill an in-flight apply thread
 - Some inherited layout surfaces can reject control updates; check layout warnings in the event log
+- **Simulate** / **API** modes remain for orchestration stubs and ADO reads; live apply is **Runner** only. UI fields `threads`, `maxRetries`, `layoutSheet`, and `backlogSheet` apply to Simulate/API, not runner jobs.
 
 ---
 

@@ -2,6 +2,8 @@
 
 Standalone React UI + local FastAPI runner for Business Process Catalog Azure DevOps setup.
 
+Repo entry: [../README.md](../README.md).
+
 Excel remains the authoring format. The runner parses workbooks into an intermediate representation (IR), plans the run, and applies changes through Azure DevOps REST APIs.
 
 **This app does not spawn the Microsoft July Python scripts.**  
@@ -11,6 +13,7 @@ Excel remains the authoring format. The runner parses workbooks into an intermed
 |-----|----------|
 | **[USER_GUIDE.md](./USER_GUIDE.md)** | Requirements, install, step-by-step usage, modes, Excel sheets, API, troubleshooting |
 | **[CHANGELOG.md](./CHANGELOG.md)** | What changed in the standalone rebuild and later releases |
+| **[docs/reference/](./docs/reference/)** | Post-create process template analysis (e.g. MSBPC Jul 2026) |
 
 ---
 
