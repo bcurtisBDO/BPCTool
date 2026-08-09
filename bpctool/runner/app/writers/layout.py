@@ -196,12 +196,19 @@ def apply_layout(
     return stats
 
 
+MULTIVALUE_CONTRIBUTION_ID = (
+    "ms-devlabs.vsts-extensions-multivalue-control.multivalue-form-control"
+)
+
+
 def _control_type(field: dict[str, Any] | str, reference_name: str = "") -> str:
     """July get_control_type — default is ``Field``, not FieldControl."""
     if isinstance(field, dict):
         field_type = field.get("field_type") or ""
         reference_name = field.get("reference_name") or reference_name
         is_picklist = (field_type or "").lower().startswith("picklist")
+        if field.get("multi_select") and is_picklist:
+            return "MultivalueContribution"
     else:
         field_type = field
         is_picklist = (field_type or "").lower().startswith("picklist")
@@ -308,27 +315,59 @@ def _add_control_to_group(
     if not ref or not group_id:
         return False
     control_type = _control_type(field)
-    # July primary type first; FieldControl kept as fallback for older tenants.
-    type_candidates = [control_type]
-    if control_type == "Field":
-        type_candidates.append("FieldControl")
-    elif control_type == "FieldControl":
-        type_candidates.append("Field")
-
-    last_error: AdoError | None = None
-    for candidate in type_candidates:
-        try:
-            client.post(
-                f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}"
-                f"/layout/groups/{quote(group_id, safe='')}/controls",
-                json_body={
+    bodies: list[dict[str, Any]] = []
+    if control_type == "MultivalueContribution":
+        # DevLabs multivalue control (July Script 2). Extension must be installed
+        # on the org; fall back to native picklist control if contribution fails.
+        bodies.append(
+            {
+                "id": ref,
+                "label": label,
+                "visible": True,
+                "inherited": False,
+                "order": order,
+                "isContribution": True,
+                "contribution": {
+                    "contributionId": MULTIVALUE_CONTRIBUTION_ID,
+                    "inputs": {"FieldName": ref},
+                },
+            }
+        )
+        bodies.append(
+            {
+                "id": ref,
+                "label": label,
+                "controlType": "PickListStringControl",
+                "visible": True,
+                "inherited": True,
+                "order": order,
+            }
+        )
+    else:
+        type_candidates = [control_type]
+        if control_type == "Field":
+            type_candidates.append("FieldControl")
+        elif control_type == "FieldControl":
+            type_candidates.append("Field")
+        for candidate in type_candidates:
+            bodies.append(
+                {
                     "id": ref,
                     "label": label,
                     "controlType": candidate,
                     "visible": True,
                     "inherited": True,
                     "order": order,
-                },
+                }
+            )
+
+    last_error: AdoError | None = None
+    for body in bodies:
+        try:
+            client.post(
+                f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}"
+                f"/layout/groups/{quote(group_id, safe='')}/controls",
+                json_body=body,
                 api_version="7.1-preview.1",
             )
             return True

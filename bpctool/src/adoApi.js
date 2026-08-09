@@ -245,17 +245,6 @@ export async function fetchProcessWorkItemTypes(
   }))
 }
 
-/** Lightweight credential proof — same idea as Toolkit “Fetch Projects”. */
-export async function testConnection(orgUrl, pat, { signal } = {}) {
-  const projects = await fetchProjects(orgUrl, pat, { signal })
-  return {
-    ok: true,
-    projectCount: projects.length,
-    projects,
-    message: `Connected. Found ${projects.length} project${projects.length === 1 ? '' : 's'}.`,
-  }
-}
-
 /**
  * API-mode step body: live ADO reads that prove wiring (not full Python parity).
  */

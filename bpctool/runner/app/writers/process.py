@@ -10,6 +10,15 @@ from ..ado_client import AdoClient, AdoError
 Emit = Callable[[str, str], None]
 
 
+def multiselect_field_labels(ir: dict[str, Any]) -> set[str]:
+    """Labels marked Multi-select on the Fields sheet (July suggested picklists)."""
+    return {
+        str(field.get("label") or field.get("field_name") or "").strip()
+        for field in ir.get("process", {}).get("fields") or []
+        if field.get("multi_select") and (field.get("label") or field.get("field_name"))
+    }
+
+
 def apply_process(
     client: AdoClient,
     ir: dict[str, Any],
@@ -160,6 +169,17 @@ def apply_process(
     # Refresh after creates so later steps see process-local refs (Process.Bug, etc.)
     existing = _index_process_wits(client.list_process_wits(process_id))
 
+    # Multi-select Labels (Application family, Products, Industries, …) use July
+    # suggested-picklist semantics so semicolon-separated values can be stored;
+    # layout then binds the DevLabs multivalue control.
+    multiselect_labels = multiselect_field_labels(ir)
+    if multiselect_labels:
+        emit(
+            "process",
+            "Multi-value picklists (suggested): "
+            + ", ".join(sorted(multiselect_labels)),
+        )
+
     # Picklists
     lists_data = client.get("/_apis/work/processes/lists", api_version="7.1") or {}
     existing_lists = {item.get("name"): item for item in lists_data.get("value") or []}
@@ -168,7 +188,9 @@ def apply_process(
             "name": label,
             "type": "String",
             "items": values,
-            "isSuggested": False,
+            # Suggested lists accept stored values beyond a single picklist token
+            # (semicolon composites for multi-select / DevLabs).
+            "isSuggested": label in multiselect_labels,
         }
         try:
             if label in existing_lists:
@@ -204,6 +226,7 @@ def apply_process(
         label = field.get("label") or field.get("field_name")
         name = field.get("field_name") or label
         description = field.get("description") or ""
+        is_multi = bool(field.get("multi_select"))
 
         if field_type in {"PicklistString", "PicklistInteger"}:
             picklist_id = picklist_ids.get(label)
@@ -216,7 +239,7 @@ def apply_process(
                 "referenceName": reference,
                 "type": "String",
                 "isPicklist": True,
-                "isPicklistSuggested": bool(field.get("multi_select")),
+                "isPicklistSuggested": is_multi,
                 "picklistId": picklist_id,
                 "description": description,
             }

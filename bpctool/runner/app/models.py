@@ -82,6 +82,11 @@ class ApplyResult(BaseModel):
     output_dir: str | None = None
     error: str | None = None
     events: list[dict[str, Any]] = []
+    duration_ms: int | None = None
+    timings: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-step duration rows: stepId, durationMs, skipped",
+    )
 
 
 class JobCreateRequest(DryRunRequest):
@@ -98,6 +103,9 @@ class JobStatusResponse(BaseModel):
     mode: str
     created_at: str
     updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
     result: DryRunResponse | None = None
     apply_result: ApplyResult | None = None
     error: str | None = None

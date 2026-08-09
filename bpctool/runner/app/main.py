@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -24,10 +25,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEFAULT_EXCEL = (
-    Path(__file__).resolve().parents[2] / "fixtures" / "ADO template guideline (July).xlsx"
+# Template is user-supplied (not bundled). Optional discovery:
+# BPCTOOL_TEMPLATE, or same file name under the catalog folder.
+DEFAULT_CATALOG = Path(os.environ.get("BPCTOOL_CATALOG", "/Users/bill/BPC Files"))
+_TEMPLATE_NAMES = (
+    "ADO template guideline (July).xlsx",
+    "ADO template guideline.xlsx",
 )
-DEFAULT_CATALOG = Path("/Users/bill/BPC Files")
+
+
+def _discover_template() -> Path | None:
+    env = (os.environ.get("BPCTOOL_TEMPLATE") or "").strip()
+    if env:
+        path = Path(env).expanduser()
+        return path if path.is_file() else None
+    if DEFAULT_CATALOG.is_dir():
+        for name in _TEMPLATE_NAMES:
+            candidate = DEFAULT_CATALOG / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 @app.get("/health")
@@ -47,8 +64,9 @@ def health() -> dict[str, str]:
 
 @app.get("/defaults")
 def defaults() -> dict[str, str | None]:
+    template = _discover_template()
     return {
-        "excel_file": str(DEFAULT_EXCEL) if DEFAULT_EXCEL.exists() else None,
+        "excel_file": str(template) if template else None,
         "catalog_source_dir": str(DEFAULT_CATALOG) if DEFAULT_CATALOG.exists() else None,
     }
 

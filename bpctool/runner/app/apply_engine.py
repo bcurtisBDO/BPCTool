@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +12,7 @@ from .excel_ir import build_ir
 from .models import ApplyResult, DryRunRequest, DryRunResponse
 from .org_url import normalize_ado_org_url, parse_ado_org_url
 from .planner import STEP_ORDER, build_dry_run_plan
+from .timing import format_duration_ms, summarize_timings
 from .writers import (
     apply_backlog,
     apply_catalog,
@@ -46,6 +48,8 @@ def run_apply(
     catalog_limit: int | None = None,
 ) -> ApplyResult:
     events: list[dict[str, Any]] = []
+    timings: list[dict[str, Any]] = []
+    run_started = time.perf_counter()
 
     def _emit(event: dict[str, Any]) -> None:
         events.append(event)
@@ -83,6 +87,8 @@ def run_apply(
             output_dir=None,
             error="; ".join(plan.errors),
             events=events,
+            duration_ms=0,
+            timings=[],
         )
 
     org_url = normalize_ado_org_url(request.org_url)
@@ -106,11 +112,13 @@ def run_apply(
                 continue
             action = step.get("planned_action")
             if action == "skip":
-                step_results[step_id] = {"skipped": True}
+                step_results[step_id] = {"skipped": True, "duration_ms": 0}
+                timings.append({"stepId": step_id, "durationMs": 0, "skipped": True})
                 _emit(
                     {
                         "type": "step-skipped",
                         "stepId": step_id,
+                        "durationMs": 0,
                         "message": f"Skipped {step_id} by plan/policy",
                     }
                 )
@@ -123,6 +131,7 @@ def run_apply(
                     "message": f"Starting {step_id} ({action})",
                 }
             )
+            step_started = time.perf_counter()
 
             if step_id == "process":
                 result = apply_process(client, ir, dry_run=dry_run, emit=step_emit)
@@ -168,19 +177,27 @@ def run_apply(
             else:
                 result = {"skipped": True, "reason": f"Unknown step {step_id}"}
 
+            duration_ms = int((time.perf_counter() - step_started) * 1000)
+            if isinstance(result, dict):
+                result = {**result, "duration_ms": duration_ms}
             step_results[step_id] = result
+            timings.append(
+                {"stepId": step_id, "durationMs": duration_ms, "skipped": False}
+            )
             _emit(
                 {
                     "type": "step-completed",
                     "stepId": step_id,
-                    "message": f"Finished {step_id}",
+                    "durationMs": duration_ms,
+                    "message": f"Finished {step_id} ({format_duration_ms(duration_ms)})",
                     "result": result,
                 }
             )
 
         # Ensure report exists even if filtered out mid-run
         if "report" not in step_results and (not step_filter or "report" in selected):
-            step_results["report"] = apply_report(
+            step_started = time.perf_counter()
+            report_result = apply_report(
                 ir,
                 step_results=step_results,
                 output_dir=output_dir,
@@ -188,6 +205,22 @@ def run_apply(
                 emit=step_emit,
                 dry_run=dry_run,
             )
+            duration_ms = int((time.perf_counter() - step_started) * 1000)
+            step_results["report"] = {**report_result, "duration_ms": duration_ms}
+            timings.append(
+                {"stepId": "report", "durationMs": duration_ms, "skipped": False}
+            )
+
+        total_ms = int((time.perf_counter() - run_started) * 1000)
+        summary_text = summarize_timings(timings, total_ms=total_ms)
+        _emit(
+            {
+                "type": "run-summary",
+                "durationMs": total_ms,
+                "timings": timings,
+                "message": f"Run timing:\n{summary_text}",
+            }
+        )
 
         return ApplyResult(
             ok=True,
@@ -197,9 +230,24 @@ def run_apply(
             output_dir=str(output_dir),
             error=None,
             events=events,
+            duration_ms=total_ms,
+            timings=timings,
         )
     except Exception as exc:  # noqa: BLE001
-        _emit({"type": "job-error", "message": str(exc)})
+        total_ms = int((time.perf_counter() - run_started) * 1000)
+        _emit({"type": "job-error", "message": str(exc), "durationMs": total_ms})
+        if timings:
+            _emit(
+                {
+                    "type": "run-summary",
+                    "durationMs": total_ms,
+                    "timings": timings,
+                    "message": (
+                        f"Run timing (failed after {format_duration_ms(total_ms)}):\n"
+                        f"{summarize_timings(timings, total_ms=total_ms)}"
+                    ),
+                }
+            )
         return ApplyResult(
             ok=False,
             dry_run=dry_run,
@@ -208,22 +256,6 @@ def run_apply(
             output_dir=str(output_dir),
             error=str(exc),
             events=events,
+            duration_ms=total_ms,
+            timings=timings,
         )
-
-
-def plan_only(request: DryRunRequest) -> DryRunResponse:
-    ir = build_ir(
-        request.excel_file,
-        catalog_source_dir=request.catalog_source_dir,
-        workbook_version=request.workbook_version,
-        process_name=request.process_name,
-        project_name=request.project_name,
-    )
-    return build_dry_run_plan(
-        ir,
-        update_policy=request.update_policy,
-        confirm_process_update=request.confirm_process_update,
-        confirm_project_update=request.confirm_project_update,
-        known_process_exists=request.known_process_exists,
-        known_project_exists=request.known_project_exists,
-    )

@@ -12,6 +12,8 @@ import {
 } from './targetAssessment'
 import { buildRunnerJobBody, runRunnerJob } from './runnerApi'
 import {
+  formatDurationMs,
+  formatTimingSummary,
   migrateCompletedStepIds,
   resolveTargetSteps,
   runWorkflowFlow,
@@ -19,12 +21,10 @@ import {
   workflowDefinitions,
 } from './workflowEngine'
 
-const PROFILES_KEY = 'bpcProfiles'
 const COMPLETION_CACHE_KEY = 'bpcCompletedSteps'
 const WORKBOOK_APPLIES_KEY = 'bpcWorkbookApplies'
 const SESSION_ORG_URL = 'bpcSessionOrgUrl'
 const SESSION_PAT = 'bpcSessionPat'
-const SESSION_PROFILE = 'bpcSessionProfile'
 const SESSION_PROJECT = 'bpcSessionProject'
 const SESSION_PROJECT_DESCRIPTION = 'bpcSessionProjectDescription'
 const SESSION_PROCESS = 'bpcSessionProcess'
@@ -93,20 +93,6 @@ const buildCacheKey = (orgUrl, processName, projectName) => {
   return `${orgKey}::${processKey}::${projectKey || '__pre_project__'}`
 }
 
-const normalizeProfiles = (raw) => {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return {}
-  }
-
-  return Object.fromEntries(
-    Object.entries(raw).map(([name, profile]) => {
-      const rawUrl = typeof profile?.orgUrl === 'string' ? profile.orgUrl : ''
-      const normalized = normalizeAdoOrgUrl(rawUrl)
-      return [name, { orgUrl: normalized.ok ? normalized.url : rawUrl }]
-    }),
-  )
-}
-
 const normalizeCompletionCache = (raw) => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return {}
@@ -157,7 +143,6 @@ const statusLabelMap = {
 function App() {
   const [orgUrl, setOrgUrlState] = useState(() => readSession(SESSION_ORG_URL))
   const [pat, setPatState] = useState(() => readSession(SESSION_PAT))
-  const [profileName, setProfileNameState] = useState(() => readSession(SESSION_PROFILE))
   const [showPat, setShowPat] = useState(false)
   const [selectedWorkflowId, setSelectedWorkflowId] = useState(
     workflowDefinitions[0].id,
@@ -167,9 +152,7 @@ function App() {
     const stored = readSession(SESSION_EXECUTION_MODE, 'runner')
     return ['api', 'runner', 'simulate'].includes(stored) ? stored : 'runner'
   })
-  const [templatePath, setTemplatePath] = useState(
-    '/Users/bill/dev/BPCTool/bpctool/fixtures/ADO template guideline (July).xlsx',
-  )
+  const [templatePath, setTemplatePath] = useState('')
   const [catalogSourceDir, setCatalogSourceDir] = useState('/Users/bill/BPC Files')
   const [pathPickerOpen, setPathPickerOpen] = useState(false)
   const [pathPickerMode, setPathPickerMode] = useState('file')
@@ -199,12 +182,13 @@ function App() {
   const [runMessage, setRunMessage] = useState('No action run yet.')
   const [runLogs, setRunLogs] = useState([])
   const [isRunning, setIsRunning] = useState(false)
-  const [profiles, setProfiles] = useState(() => {
-    const scrubbed = normalizeProfiles(loadJson(PROFILES_KEY, {}))
-    localStorage.setItem(PROFILES_KEY, JSON.stringify(scrubbed))
-    return scrubbed
-  })
   const [completionCache, setCompletionCache] = useState(() => {
+    try {
+      localStorage.removeItem('bpcProfiles')
+      sessionStorage.removeItem('bpcSessionProfile')
+    } catch {
+      /* ignore */
+    }
     const scoped = normalizeCompletionCache(loadJson(COMPLETION_CACHE_KEY, {}))
     localStorage.setItem(COMPLETION_CACHE_KEY, JSON.stringify(scoped))
     return scoped
@@ -242,7 +226,17 @@ function App() {
       if (defaults.catalog_source_dir) {
         setCatalogSourceDir(defaults.catalog_source_dir)
       }
-      setRunMessage('Loaded template/catalog defaults from local runner.')
+      if (defaults.excel_file || defaults.catalog_source_dir) {
+        setRunMessage(
+          defaults.excel_file
+            ? 'Loaded template/catalog defaults from local runner.'
+            : 'Loaded catalog folder default. Set Template workbook path (Browse…) — the guideline .xlsx is not bundled.',
+        )
+      } else {
+        setRunMessage(
+          'No defaults found. Set Template workbook path and Catalog source folder (Browse…).',
+        )
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -266,11 +260,6 @@ function App() {
     writeSession(SESSION_PAT, value)
     setProjectsFetched(false)
     setProcessesFetched(false)
-  }
-
-  const setProfileName = (value) => {
-    setProfileNameState(value)
-    writeSession(SESSION_PROFILE, value)
   }
 
   const setProjectName = (value) => {
@@ -428,8 +417,6 @@ function App() {
     return `Will run: ${titles.join(' → ')}`
   }, [plannedStepIds, runMode])
 
-  const profileKeys = Object.keys(profiles)
-
   const persistCompletionCache = (updater) => {
     setCompletionCache((previous) => {
       const nextCache = typeof updater === 'function' ? updater(previous) : updater
@@ -446,42 +433,12 @@ function App() {
     ].slice(0, 120))
   }
 
-  const saveProfile = () => {
-    if (!profileName || !orgUrl.trim()) {
-      setRunMessage('Enter profile name and org URL before saving.')
+  const logRunTiming = (timings, totalMs, { failed = false } = {}) => {
+    if (!timings?.length && totalMs == null) {
       return
     }
-
-    const normalized = normalizeAdoOrgUrl(orgUrl)
-    if (!normalized.ok) {
-      setRunMessage(`Cannot save profile: ${normalized.error}`)
-      return
-    }
-
-    const next = { ...profiles, [profileName]: { orgUrl: normalized.url } }
-    localStorage.setItem(PROFILES_KEY, JSON.stringify(next))
-    setProfiles(next)
-    setOrgUrl(normalized.url)
-    setRunMessage(
-      `Saved profile "${profileName}" (org URL only; PAT stays in this browser session).`,
-    )
-  }
-
-  const loadProfile = (name) => {
-    const profile = profiles[name]
-    if (!profile) {
-      return
-    }
-
-    setProfileName(name)
-    setOrgUrl(profile.orgUrl)
-    setPat('')
-    setProjects([])
-    setProjectsFetched(false)
-    setProcesses([])
-    setProcessesFetched(false)
-    setApiStatusText(`Loaded profile "${name}". Re-enter the PAT, then fetch projects.`)
-    setRunMessage(`Loaded profile "${name}". Re-enter the PAT for this session.`)
+    const header = failed ? 'Run timing (failed):' : 'Run timing:'
+    addLog(`${header}\n${formatTimingSummary(timings || [], totalMs)}`)
   }
 
   const handleFetchProjects = async () => {
@@ -601,7 +558,7 @@ function App() {
 
   const previewPlan = async () => {
     if (!connectionReady) {
-      setPlanError('Set org URL and PAT in the connection profile first.')
+      setPlanError('Set org URL and PAT in Connection first.')
       return
     }
     if (!nameValidation.ok) {
@@ -667,7 +624,7 @@ function App() {
     }
 
     if (!connectionReady) {
-      setRunMessage('Set org URL and PAT in the connection profile first.')
+      setRunMessage('Set org URL and PAT in Connection first.')
       return
     }
 
@@ -771,6 +728,10 @@ function App() {
               if ((event.type === 'step-failed' || event.type === 'job-error') && stepId) {
                 setStepStatus(stepId, 'failed')
               }
+              if (event.type === 'run-summary') {
+                addLog(message)
+                return
+              }
               addLog(stepId ? `${stepId}: ${message}` : message)
             },
           },
@@ -782,6 +743,15 @@ function App() {
           runConfig.projectName,
         )
         const applyOk = job.status === 'succeeded' && (job.apply_result?.ok ?? false)
+        const timings = job.apply_result?.timings || []
+        const totalMs =
+          job.apply_result?.duration_ms ?? job.duration_ms ?? null
+        // run-summary event already logged when present; ensure a summary if missing.
+        if (!job.events?.some((event) => event.type === 'run-summary')) {
+          logRunTiming(timings, totalMs, { failed: !applyOk })
+        }
+        const timingNote =
+          totalMs != null ? ` Total ${formatDurationMs(totalMs)}.` : ''
         if (applyOk) {
           // Never mark steps complete / record workbook apply for dry-run —
           // otherwise dependency-aware runs skip real work next time.
@@ -807,11 +777,13 @@ function App() {
             dryRun
               ? `Apply dry-run finished — no Azure DevOps changes were made${
                   out ? ` (preview artifacts in ${out})` : ''
-                }. Uncheck “Apply dry-run” and run again to mutate the org.`
-              : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.`,
+                }.${timingNote} Uncheck “Apply dry-run” and run again to mutate the org.`
+              : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.${timingNote}`,
           )
         } else {
-          setRunMessage(`Runner job failed: ${job.error || 'unknown error'}`)
+          setRunMessage(
+            `Runner job failed: ${job.error || 'unknown error'}.${timingNote}`,
+          )
         }
       } else {
         const result = await runWorkflowFlow({
@@ -867,6 +839,10 @@ function App() {
               setStepStatus(event.stepId, 'failed')
               addLog(`${event.stepTitle}: FAILED - ${event.message}`)
             }
+
+            if (event.type === 'run-summary') {
+              addLog(event.message)
+            }
           },
         })
 
@@ -890,11 +866,17 @@ function App() {
           persistWorkbookApply(result.appliedWorkbook)
         }
 
+        const timingNote =
+          result.durationMs != null
+            ? ` Total ${formatDurationMs(result.durationMs)}.`
+            : ''
+
         if (result.ok) {
           setRunOverlay({ key: activeCacheKey, statuses: {} })
           setRunMessage(
-            result.message ??
-              `Flow completed successfully in ${runModeLabel.toLowerCase()} mode (${executionMode}).`,
+            (result.message ??
+              `Flow completed successfully in ${runModeLabel.toLowerCase()} mode (${executionMode}).`) +
+              timingNote,
           )
         } else if (result.error?.code === 'ABORTED') {
           setRunOverlay((current) => {
@@ -923,7 +905,7 @@ function App() {
                 : {}
             return { key: activeCacheKey, statuses }
           })
-          setRunMessage(`Flow failed: ${result.error.message}`)
+          setRunMessage(`Flow failed: ${result.error.message}.${timingNote}`)
         }
       }
     } catch (error) {
@@ -964,11 +946,6 @@ function App() {
       </header>
 
       <ConnectionPanel
-        profileName={profileName}
-        onProfileNameChange={setProfileName}
-        profileKeys={profileKeys}
-        onSaveProfile={saveProfile}
-        onLoadProfile={loadProfile}
         orgUrl={orgUrl}
         onOrgUrlChange={setOrgUrl}
         pat={pat}
@@ -1239,8 +1216,9 @@ function App() {
               </button>
             </div>
             <small className="field-hint">
-              Absolute path to the ADO template guideline <code>.xlsx</code> (not the catalog
-              folder). Use Browse… or Load runner defaults.
+              Absolute path to your ADO template guideline <code>.xlsx</code> (not bundled; not
+              the catalog folder). Use Browse… or Load runner defaults if the file sits in the
+              catalog folder.
             </small>
           </label>
           <label className="span-12">

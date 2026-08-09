@@ -34,6 +34,17 @@ def test_control_types_match_july():
     assert (
         _control_type(
             {
+                "field_type": "PicklistString",
+                "reference_name": "MSBPC.applicationfamily",
+                "label": "Application family",
+                "multi_select": True,
+            }
+        )
+        == "MultivalueContribution"
+    )
+    assert (
+        _control_type(
+            {
                 "field_type": "Identity",
                 "reference_name": "System.AssignedTo",
             }

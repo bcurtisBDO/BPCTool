@@ -16,10 +16,6 @@ def list_roots() -> list[dict[str, str]]:
     roots: list[dict[str, str]] = [
         {"label": "Home", "path": str(home)},
     ]
-    bpctool = Path(__file__).resolve().parents[2]
-    fixtures = bpctool / "fixtures"
-    if fixtures.is_dir():
-        roots.append({"label": "BPCTool fixtures", "path": str(fixtures)})
     catalog = home / "BPC Files"
     if catalog.is_dir():
         roots.append({"label": "BPC Files", "path": str(catalog)})

@@ -351,6 +351,33 @@ export const stepExecutors = {
 
 export { normalizeAdoOrgUrl, parseAdoOrgUrl, assessExistingTargets, gateExistingTargetUpdates }
 
+export function formatDurationMs(ms) {
+  const value = Math.max(0, Math.round(Number(ms) || 0))
+  if (value < 1000) {
+    return `${value}ms`
+  }
+  const seconds = value / 1000
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`
+  }
+  const minutes = Math.floor(seconds / 60)
+  const rem = seconds - minutes * 60
+  return `${minutes}m ${rem.toFixed(1)}s`
+}
+
+export function formatTimingSummary(timings = [], totalMs) {
+  const lines = timings.map((row) => {
+    if (row.skipped) {
+      return `  ${row.stepId}: skipped`
+    }
+    return `  ${row.stepId}: ${formatDurationMs(row.durationMs)}`
+  })
+  if (totalMs != null) {
+    lines.push(`  total: ${formatDurationMs(totalMs)}`)
+  }
+  return lines.length ? lines.join('\n') : '  (no steps)'
+}
+
 const emit = (onEvent, event) => {
   if (typeof onEvent === 'function') {
     onEvent({
@@ -459,14 +486,17 @@ export async function runWorkflowFlow({
     }
   }
 
+  const timings = []
   if (gated.skippedStepIds.length > 0) {
     const skipSet = new Set(gated.skippedStepIds)
     targetStepIds = targetStepIds.filter((stepId) => !skipSet.has(stepId))
     for (const stepId of gated.skippedStepIds) {
       nextCompletedSet.add(stepId)
+      timings.push({ stepId, durationMs: 0, skipped: true })
       emit(onEvent, {
         type: 'step-skipped',
         stepId,
+        durationMs: 0,
         message: `Skipped ${stepId} because the target already exists (skip-existing policy).`,
       })
     }
@@ -494,6 +524,7 @@ export async function runWorkflowFlow({
   }
 
   let appliedWorkbook = null
+  const runStarted = performance.now()
 
   try {
     throwIfAborted(signal)
@@ -535,14 +566,25 @@ export async function runWorkflowFlow({
         message: `Starting ${step.script}`,
       })
 
+      const stepStarted = performance.now()
       const result = await runStepWithRetry(step, runConfig, onEvent, executeStep, signal)
+      const durationMs = Math.round(performance.now() - stepStarted)
 
       if (!result.ok) {
+        timings.push({ stepId: step.id, durationMs, skipped: false })
         emit(onEvent, {
           type: 'step-failed',
           stepId: step.id,
           stepTitle: step.title,
+          durationMs,
           message: result.error.message,
+        })
+        const totalMs = Math.round(performance.now() - runStarted)
+        emit(onEvent, {
+          type: 'run-summary',
+          durationMs: totalMs,
+          timings,
+          message: `Run timing (failed):\n${formatTimingSummary(timings, totalMs)}`,
         })
 
         return {
@@ -550,6 +592,8 @@ export async function runWorkflowFlow({
           completedStepIds: Array.from(nextCompletedSet),
           assessment,
           appliedWorkbook,
+          durationMs: totalMs,
+          timings,
           error: result.error,
         }
       }
@@ -559,11 +603,13 @@ export async function runWorkflowFlow({
         appliedWorkbook = result.workbookApplied
       }
 
+      timings.push({ stepId: step.id, durationMs, skipped: false })
       emit(onEvent, {
         type: 'step-completed',
         stepId: step.id,
         stepTitle: step.title,
-        message: result.details,
+        durationMs,
+        message: `${result.details} (${formatDurationMs(durationMs)})`,
         warnings: result.warnings,
       })
 
@@ -579,11 +625,21 @@ export async function runWorkflowFlow({
       }
     }
 
+    const totalMs = Math.round(performance.now() - runStarted)
+    emit(onEvent, {
+      type: 'run-summary',
+      durationMs: totalMs,
+      timings,
+      message: `Run timing:\n${formatTimingSummary(timings, totalMs)}`,
+    })
+
     return {
       ok: true,
       completedStepIds: Array.from(nextCompletedSet),
       assessment,
       appliedWorkbook,
+      durationMs: totalMs,
+      timings,
     }
   } catch (error) {
     if (error?.code === 'ABORTED' || signal?.aborted) {

@@ -4,14 +4,12 @@ from app.catalog_import import load_catalog_drafts
 from app.excel_ir import build_ir
 from app.mapping import build_mapping_from_ir
 
-ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT.parent / "fixtures" / "ADO template guideline (July).xlsx"
 CATALOG = Path("/Users/bill/BPC Files")
 
 
-def test_catalog_drafts_preserve_markdown_by_default():
+def test_catalog_drafts_preserve_markdown_by_default(template_path):
     ir = build_ir(
-        str(FIXTURE),
+        str(template_path),
         catalog_source_dir=str(CATALOG),
         process_name="Business Process Catalog",
         project_name="Contoso-BPC",
@@ -32,9 +30,9 @@ def test_catalog_drafts_preserve_markdown_by_default():
     assert "<p>" not in sample
 
 
-def test_catalog_drafts_convert_markdown_when_requested():
+def test_catalog_drafts_convert_markdown_when_requested(template_path):
     ir = build_ir(
-        str(FIXTURE),
+        str(template_path),
         catalog_source_dir=str(CATALOG),
         process_name="Business Process Catalog",
         project_name="Contoso-BPC",
@@ -54,9 +52,9 @@ def test_catalog_drafts_convert_markdown_when_requested():
     assert converted[0].markdown_format_fields == []
 
 
-def test_ir_counts_html_fields():
+def test_ir_counts_html_fields(template_path):
     ir = build_ir(
-        str(FIXTURE),
+        str(template_path),
         catalog_source_dir=str(CATALOG),
         process_name="Business Process Catalog",
         project_name="Contoso-BPC",

@@ -2,6 +2,42 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Template not bundled; scaffold cleanup
+
+- ADO **template guideline** `.xlsx` is user-supplied (removed `fixtures/`); `/defaults` may discover it via `BPCTOOL_TEMPLATE` or under the catalog folder
+- Removed unused `.github/copilot-instructions.md` and `.vscode/launch.json`
+
+## 2026-08 — Catalog required-field defaults
+
+- When a required Fields-sheet field is empty in the catalog spreadsheet but has a **Default value**, Catalog Import / prevalidate fills that default (e.g. Business process flow source → `Microsoft`)
+- Remaining required empties (no default) still report in `import-prevalidate.json`
+
+## 2026-08 — Run timings, remove profiles, cleanup
+
+- Apply/job runs emit **Run timing** (per-step `durationMs` + total) in the event log and on `ApplyResult` / `JobStatusResponse`
+- Removed **Save / Load profile** UI and `bpcProfiles` storage (org URL + PAT remain session-only)
+- Removed unused Vite scaffold assets (`src/assets/*`, `public/icons.svg`), dead `plan_only` / `testConnection` helpers
+- Docs updated for connection panel rename and timing summary
+
+## 2026-08 — Docs sync (catalog, multi-value, prevalidate)
+
+- README / USER_GUIDE / CHANGELOG updated for Catalog Import (all matching workbooks), Title 1..N parents, multi-value picklists, prevalidate artifacts, and re-import guidance
+- USER_GUIDE §9 documents catalog sources, hierarchy, keys, prevalidate actions, create-only behavior, and System.State ownership
+
+## 2026-08 — Multi-value picklists + catalog prevalidate
+
+- Fields marked **Multi-select** (Application family, Products, Industries, …) create July-style **suggested** picklists (`isSuggested` / `isPicklistSuggested`) so semicolon-separated values import
+- Layout binds DevLabs **Multivalue** control for those fields (falls back to native picklist if the extension is missing)
+- Catalog **prevalidate** before create: strip `Area Path=Not found`, strip Test Case `State=New`, strip invalid single picklist values, normalize multi-select tokens; writes `import-prevalidate.json`
+- Module: `catalog_validate.py`; tests for prevalidate, multiselect labels, layout control type
+
+## 2026-08 — Catalog parent links (Title outline)
+
+- Parent/child links follow **Title 1..N** columns (ADO CSV import hierarchy), per [Microsoft Learn](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops)
+- Process sequence ID is stored on the work item / used as a key, **not** used to derive relationships
+- Catalog Import loads **all** matching workbooks in the catalog folder (Business Process Catalog, Deliverables, Objectives, SbD Delivery Plan, etc.)
+- Catalog import reports linked / missing-parent counts; `ado-id-map.csv` includes ParentKey/ParentId
+
 ## 2026-08 — Docs sync + UI layout
 
 - README / USER_GUIDE rewritten for current launchers, run modes, Excel backlog/disabled WITs, project description, org URL forms, path browser, and troubleshooting
@@ -73,7 +109,9 @@ Added FastAPI app on `127.0.0.1:8787` (proxied as `/api` from Vite):
 | `excel_ir.py` | Parse July template sheets + catalog folder into IR |
 | `planner.py` | Deterministic dry-run plan + update-policy gates |
 | `richtext.py` | HTML detection; optional markdown→HTML |
-| `catalog_import.py` | Catalog drafts, field mapping, multiline format flags |
+| `catalog_import.py` | Catalog drafts, Title 1..N parents, multiline format flags |
+| `catalog_validate.py` | Prevalidate / sanitize before catalog create |
+| `mapping.py` | Catalog headers → ADO field refs (+ multi_select metadata) |
 | `ado_client.py` | PAT Basic auth, retries on 429/503 |
 | `org_url.py` | Org URL parse/normalize |
 | `fs_browser.py` | Local path listing for Browse… |
@@ -113,7 +151,7 @@ API surface:
 
 ### Inputs / defaults
 
-- Template fixture: `fixtures/ADO template guideline (July).xlsx`
+- Template: user-provided ADO guideline `.xlsx` (optional discover under catalog folder / `BPCTOOL_TEMPLATE`)
 - Catalog sources default: `/Users/bill/BPC Files` (JUL 2026 package)
 - Apply artifacts: `runner-out/<org>_<project>/` (gitignored)
 
@@ -125,11 +163,13 @@ API surface:
 
 ### Explicitly not done / residual risk
 
-- Not every July script edge case is ported (e.g. DevLabs multivalue extension auto-install)
+- DevLabs Multivalue **marketplace install** is still manual (layout binds the control when Multi-select=Yes)
+- Not every July script edge case is ported
 - Inherited system WIT disable via Process API can still fail (manual ADO UI fallback)
+- Catalog is create-only (no WIP upsert); hierarchy rebuild needs a clean project after process/layout fixes
 - In-memory jobs only (lost on runner restart)
 - UI cancel stops client polling; does not always kill an in-flight apply thread
-- Large catalog imports (~15k rows) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests
+- Large catalog imports (~15k rows across all matching workbooks) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests
 
 ---
 

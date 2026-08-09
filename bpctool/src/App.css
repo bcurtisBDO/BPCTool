@@ -213,13 +213,6 @@ textarea {
   color: #16a34a;
 }
 
-.profile-actions {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.profile-actions button,
 .run-button {
   border: 1px solid var(--accent-border);
   background: var(--accent-bg);

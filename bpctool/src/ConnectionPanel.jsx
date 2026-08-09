@@ -1,15 +1,10 @@
 import { useState } from 'react'
 
 /**
- * Collapsible connection profile: profile, org URL, PAT, optional inventory fetch.
+ * Collapsible connection: org URL, PAT, optional inventory fetch, execution mode.
  * Process/project names to create live in a separate step.
  */
 export default function ConnectionPanel({
-  profileName,
-  onProfileNameChange,
-  profileKeys,
-  onSaveProfile,
-  onLoadProfile,
   orgUrl,
   onOrgUrlChange,
   pat,
@@ -44,7 +39,7 @@ export default function ConnectionPanel({
         }}
         aria-expanded={open}
       >
-        <h2>1. Connection profile</h2>
+        <h2>1. Connection</h2>
         <span className="collapse-meta">
           <span
             className={`status-chip connection-pill ${connectionReady ? 'completed' : 'idle'}`}
@@ -59,35 +54,6 @@ export default function ConnectionPanel({
 
       {open ? (
         <div className="grid-2 collapsible-body">
-          <label>
-            Profile name
-            <input
-              value={profileName}
-              onChange={(event) => onProfileNameChange(event.target.value)}
-              placeholder="Dev sandbox"
-              disabled={disabled}
-            />
-          </label>
-          <div className="profile-actions">
-            <button type="button" onClick={onSaveProfile} disabled={disabled}>
-              Save profile
-            </button>
-            <select
-              value=""
-              onChange={(event) => onLoadProfile(event.target.value)}
-              disabled={disabled}
-            >
-              <option value="" disabled>
-                Load profile
-              </option>
-              {profileKeys.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </div>
-
           <label className="field-span-full">
             Azure DevOps org URL
             <input
@@ -164,7 +130,7 @@ export default function ConnectionPanel({
           <div className="connection-note">
             <p>{connectionStatusText}</p>
             <p>
-              Profiles store org URL only. PAT stays in this browser session. Fetching existing
+              Org URL and PAT stay in this browser session only. Fetching existing
               projects/processes is optional and used to validate create vs update policy.
               The local apply engine starts automatically with the app — no separate terminal.
             </p>

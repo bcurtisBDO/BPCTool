@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,7 @@ class WorkItemDraft:
     fields: dict[str, Any]
     source_file: str
     source_row: int
+    hierarchy_level: int | None = None
     content_formats: dict[str, str] = field(default_factory=dict)
     # Field refs that should be created with /multilineFieldsFormat = Markdown
     markdown_format_fields: list[str] = field(default_factory=list)
@@ -61,7 +61,10 @@ def load_catalog_drafts(
             )
         )
         if limit is not None and len(drafts) >= limit:
-            return drafts[:limit]
+            drafts = drafts[:limit]
+            break
+    # Parents come from Title 1..N outline (ADO CSV import style), not process
+    # sequence IDs. See Microsoft Learn: about-import-catalog-devops.
     return sort_parent_first(drafts)
 
 
@@ -98,6 +101,9 @@ def _drafts_from_workbook(
                 values, mapping, convert_markdown_to_html=convert_markdown_to_html
             )
         )
+    # Parent/child links follow Title 1..N columns (ADO CSV hierarchy), matching
+    # https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops
+    _fill_title_hierarchy_parents(drafts)
     return drafts
 
 
@@ -183,12 +189,13 @@ def _row_to_draft(
 
     return WorkItemDraft(
         key=key,
-        parent_key=_parent_key(lookup, hierarchy_level),
+        parent_key=_parent_key(lookup),
         work_item_type=wit,
         title=title,
         fields={ref: value for ref, value in fields.items() if value not in (None, "")},
         source_file=str(row.get("_source_file") or ""),
         source_row=int(row.get("_source_row") or 0),
+        hierarchy_level=hierarchy_level,
         content_formats=formats,
         markdown_format_fields=markdown_format_fields,
     )
@@ -272,31 +279,43 @@ def _external_key(lookup: dict[str, Any], row: dict[str, Any]) -> str:
     return f"{stem}:{row.get('_source_sheet') or ''}:{row.get('_source_row')}"
 
 
-def _parent_key(lookup: dict[str, Any], hierarchy_level: int | None) -> str | None:
+def _parent_key(lookup: dict[str, Any]) -> str | None:
+    """Only honor explicit parent columns; hierarchy otherwise comes from Titles."""
     explicit = _first_value(
         lookup,
         "parent key",
         "parent id",
         "parent microsoft id",
         "parent process sequence id",
+        "parent",
     )
     if explicit:
         return str(explicit).strip()
-    return _derive_parent_from_sequence(_first_value(lookup, "process sequence id", "sequence id"))
-
-
-def _derive_parent_from_sequence(value: Any) -> str | None:
-    if not value:
-        return None
-    text = str(value).strip()
-    dotted = text.split(".")
-    if len(dotted) > 1 and all(part.isdigit() for part in dotted):
-        return ".".join(dotted[:-1])
-    for pattern in (r"^(.*)[.](\d+)$", r"^(.*)[/](.+)$", r"^(.*)[-](\d+)$"):
-        match = re.match(pattern, text)
-        if match:
-            return match.group(1)
     return None
+
+
+def _fill_title_hierarchy_parents(drafts: list[WorkItemDraft]) -> None:
+    """Set parent_key from Title 1..N columns (ADO CSV import hierarchy).
+
+    Same model as Azure DevOps bulk CSV import and the Business Process Catalog
+    guidance: Title 1 is the root, Title 2 a child of the prior Title 1, etc.
+    Process sequence ID is stored as a field/key but is not used for linking.
+    Explicit parent_* columns on a row win over the outline.
+    """
+    last_at_level: dict[int, str] = {}
+    for draft in drafts:
+        level = draft.hierarchy_level
+        if level is None:
+            continue
+        if not draft.parent_key:
+            for candidate in range(level - 1, 0, -1):
+                if candidate in last_at_level:
+                    draft.parent_key = last_at_level[candidate]
+                    break
+        for existing in list(last_at_level):
+            if existing >= level:
+                del last_at_level[existing]
+        last_at_level[level] = draft.key
 
 
 def _first_value(lookup: dict[str, Any], *keys: str) -> str | None:

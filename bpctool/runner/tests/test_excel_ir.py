@@ -3,8 +3,6 @@ from pathlib import Path
 from app.excel_ir import build_ir, is_catalog_source_file, parse_area_paths
 from app.planner import build_dry_run_plan
 
-ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT.parent / "fixtures" / "ADO template guideline (July).xlsx"
 CATALOG = Path("/Users/bill/BPC Files")
 
 
@@ -19,8 +17,8 @@ def test_catalog_source_file_naming():
     assert not is_catalog_source_file(Path("~$Deliverables JUL 2026.xlsx"))
 
 
-def test_parse_area_paths_skips_project_column_and_keeps_hierarchy():
-    areas = parse_area_paths(FIXTURE)
+def test_parse_area_paths_skips_project_column_and_keeps_hierarchy(template_path):
+    areas = parse_area_paths(template_path)
     assert areas
     assert all(not a["path"].startswith("Project name") for a in areas)
     assert areas[0]["path"] == "Business process catalog"
@@ -35,9 +33,9 @@ def test_parse_area_paths_skips_project_column_and_keeps_hierarchy():
     assert "Functional areas\\Finance\\Accounting" in accounting
 
 
-def test_build_ir_from_july_fixture_and_catalog():
+def test_build_ir_from_july_template_and_catalog(template_path):
     ir = build_ir(
-        str(FIXTURE),
+        str(template_path),
         catalog_source_dir=str(CATALOG),
         workbook_version="JUL-2026",
         process_name="Business Process Catalog",
@@ -62,9 +60,9 @@ def test_build_ir_from_july_fixture_and_catalog():
     assert ir["counts"]["catalog_rows"] > 1000
 
 
-def test_dry_run_plan_sequence():
+def test_dry_run_plan_sequence(template_path):
     ir = build_ir(
-        str(FIXTURE),
+        str(template_path),
         catalog_source_dir=str(CATALOG),
         process_name="Business Process Catalog",
         project_name="Contoso-BPC",
