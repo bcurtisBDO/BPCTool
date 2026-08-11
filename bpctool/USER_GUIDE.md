@@ -721,7 +721,9 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - `System.State` allowed values are owned by ADO process WIT models — not authored in the template Picklists sheet
 - Some Deliverables source columns (e.g. Job purpose / Job type / Data type) may not align with template picklists; prevalidate strips or reports but does not rewrite Microsoft source data
 - Catalog import of ~15k rows (all matching workbooks) is long-running; use apply dry-run + `catalog_limit` for smoke tests; tune **Threads** (2–8 typical)
-- Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links
+- Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links. Updated spreadsheet rows do **not** refresh existing work item fields
+- Catalog still uses one REST create per work item (parent-aware parallel); no WIT `$batch` and no HTTP connection pooling on the runner client yet
+- Only Hierarchy-Reverse parent links are created (same as July — no Related / Predecessor, etc.)
 - Job store is in-memory; restarting the runner clears job history
 - Cancel in the UI stops client polling; it does not always hard-kill an in-flight apply thread
 - Some inherited layout surfaces can reject control updates; check layout warnings in the event log
