@@ -50,6 +50,15 @@ class DryRunRequest(BaseModel):
             "multilineFieldsFormat=Markdown on create."
         ),
     )
+    catalog_parallel_workers: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        description=(
+            "Parent-aware parallel workers for Catalog Import "
+            "(July-style; UI Threads control). Use 1 for serial."
+        ),
+    )
 
 
 class PlanAction(BaseModel):

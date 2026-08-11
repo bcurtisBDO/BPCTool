@@ -1,6 +1,6 @@
 # BPCTool workflow & July comparison
 
-Engine order from `STEP_ORDER` in `runner/app/planner.py`. ADO paths via runner writers + `ado_client.py`. Comparison vs Microsoft July Azure DevOps Python scripts (phases 1–6).
+Engine order from `STEP_ORDER` in `runner/app/planner.py`. ADO paths via runner writers + `ado_client.py` / `catalog_runtime.py`. Comparison vs Microsoft July Azure DevOps Python scripts (phases 1–6).
 
 BPCTool does **not** spawn those scripts — it reimplements the intent with Excel → IR → plan → apply.
 
@@ -13,8 +13,9 @@ Multivalue preflight (extmgmt)
         │
         ▼
    process  →  layout  →  project  →  teams  →  backlog  →  catalog  →  report
-   WITs/fields   pages     create     areas     behaviors   create-only   local
-   picklists     controls  / bind     assign    iterations  work items    artifacts
+   WITs/fields   pages     create     areas     behaviors   parallel+     local
+   picklists     controls  / bind     assign    iterations  resume+       artifacts
+                                                            backfill
 ```
 
 | Step | Purpose |
@@ -25,12 +26,32 @@ Multivalue preflight (extmgmt)
 | **project** | Create or bind project to process |
 | **teams** | Teams + area paths (July Script 3 semantics) |
 | **backlog** | Backlog behaviors, WIT assignment, iterations, team settings (July Script 4) |
-| **catalog** | Import catalog workbooks (create-only) |
+| **catalog** | Import catalog workbooks: prevalidate → parent-aware parallel create → resume → parent-link backfill |
 | **report** | Local HTML/JSON summary under `runner-out/` |
 
 **Live apply only:** Multivalue preflight runs when process, layout, or project is selected and Apply dry-run is off. **Preview plan** and **Apply dry-run** skip ADO mutation (and the Multivalue UI gate). **Report** never calls ADO. Full / dependency-aware runs enforce the sequence above; selected-step mode can run a single card alone.
 
 Recommended hard sequence (planner): `process → layout → verify → project → teams → backlog → catalog → report`.
+
+---
+
+## Catalog Import (current assessment)
+
+Aligned with July Phase 5 on the operational import model; still create-only for **field** updates (no WIP upsert).
+
+| Capability | Behavior |
+|------------|----------|
+| **Hierarchy** | Title 1..N outline (ADO CSV / BPC guidance). Only `System.LinkTypes.Hierarchy-Reverse` is created — same as July (no Related / Predecessor / etc.) |
+| **Parallelism** | Parent-aware ready queue + ThreadPool (UI **Threads** → `catalog_parallel_workers`, default 4, clamp 1–16). Children wait until the parent id exists |
+| **Resume** | Load existing `ado-id-map.csv`; skip keys already imported; append new rows |
+| **Parent-link backfill** | After create, `GET` relations + `PATCH` missing Hierarchy-Reverse; writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
+| **Failures** | If a parent never imports, children fail with `Parent not imported` (not created unlinked) |
+| **Prevalidate** | Local sanitize before create (`import-prevalidate.json`) |
+| **Not done** | WIT `$batch` / native CSV bulk upload; HTTP connection pooling; WIP field upsert against existing work items |
+
+**Performance note:** Parallel workers cut wall time vs the former 1×N serial create loop (often several× when network-bound). Start at 2–8 workers; higher counts risk ATCPU/429. Chunked WIT `$batch` would reduce round-trips further but is not implemented.
+
+Key modules: `writers/catalog.py`, `catalog_runtime.py`, `ado_client.create_work_item` / `get_parent_id` / `add_parent_link`.
 
 ---
 
@@ -47,6 +68,8 @@ Vite proxies `/api/*` → FastAPI on `127.0.0.1:8787`.
 | `GET /jobs/{id}` | Poll events / step results |
 | `GET /fs/roots`, `GET /fs/list` | Path picker Browse… |
 | `POST /ir/parse` | Full IR dump (manual; UI does not call) |
+
+Job body field for catalog parallelism: `catalog_parallel_workers` (1–16; UI Threads).
 
 Browser inventory reads use `/ado-proxy/{org}` → `dev.azure.com`. Extension check/install uses `/extmgmt-proxy/{org}` → `extmgmt.dev.azure.com`.
 
@@ -67,10 +90,10 @@ Hosts:
 | **project** | `apply_project` | GET processes · `GET\|POST /_apis/projects` · `PATCH /_apis/projects/{id}` (description) |
 | **teams** | `apply_teams` (July Script 3) | `GET\|POST …/projects/{id}/teams` · `GET\|POST` classificationnodes/Areas · `PATCH` teamsettings/teamfieldvalues |
 | **backlog** | `apply_backlog` (July Script 4) | Process behaviors (GET/PUT/POST/DELETE) · WIT↔behavior · Iterations nodes · `GET\|PATCH` teamsettings · team iterations |
-| **catalog** | `apply_catalog` + prevalidate | `PATCH /{project}/_apis/wit/workitems/${type}` (JSON Patch + optional Markdown format + parent relation) |
+| **catalog** | `apply_catalog` + prevalidate + `catalog_runtime` | Parallel `PATCH …/wit/workitems/$Type` (fields + optional Markdown format + optional Hierarchy-Reverse); resume via `ado-id-map.csv`; backfill `GET …?$expand=Relations` + `PATCH …/workitems/{id}` for missing parent links |
 | **report** | `apply_report` | None — writes `bpc-ado-setup-summary.json` / `.html` under `runner-out/<org>_<project>/` |
 
-Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `writers/*.py`.
+Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catalog_runtime.py`, `writers/*.py`.
 
 ---
 
@@ -83,7 +106,7 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `write
 | `1_ADO_Creation_Script.py` (project half) | **project** (only after layout) |
 | `3_ADO_Teams_Areas_Script.py` | **teams** |
 | `4_ADO_Backlog_Config_Script.py` | **backlog** |
-| `5_BPC_Catalog_Import.py` | **catalog** |
+| `5_BPC_Catalog_Import.py` (+ `bpc_ado_import`) | **catalog** |
 | `6_Generate_HTML_Report.py` | **report** |
 
 ---
@@ -100,15 +123,20 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `write
 | **Page layout** | Script 2 threaded layout + DevLabs MultivalueContribution | `apply_layout` mirrors Script 2 patterns (HTML group create, control retries) | Improved / ported |
 | **Teams & areas** | Script 3 teams, L1–L4 areas, `set_team_area` | `apply_teams` — July semantics (first-row default area, `includeChildren` false by default) | Improved / ported |
 | **Backlog & iterations** | Script 4 Parts 1–4: behaviors, WIT assign, defaults, team iterations | `apply_backlog` — rename/heal levels, WIT↔behavior, iterations, team settings | Improved / ported |
-| **Catalog import** | Script 5 resumable ID map / retries (strongest July ops pattern) | All matching `.xlsx`; Title 1..N parents; prevalidate; **create-only** (no WIP upsert) | Gap / residual |
+| **Catalog hierarchy** | Parent-child Hierarchy-Reverse only | Same — Title 1..N; no other WIT relation types | Parity |
+| **Catalog parallelism** | `--catalog-parallel-workers` parent-aware pool | UI **Threads** / `catalog_parallel_workers` parent-aware pool | Improved / ported |
+| **Catalog resume** | Skip keys in `ado-id-map.csv` on rerun | Same append/skip resume model | Improved / ported |
+| **Catalog parent backfill** | `backfill-links` CLI (+ statuses) | Automatic post-create backfill → `backfill-links-report.csv` | Improved / ported |
+| **Catalog field updates** | Create/import mode; limited recovery updates | Create-only fields (no WIP upsert) | Near parity / residual |
 | **Report** | Script 6 HTML summary from artifacts | Local HTML/JSON under `runner-out/` (no ADO calls) | Improved / ported |
 | **Edge-case parity** | Full script surface + many ADO quirk workarounds | July-shaped, not line-for-line; residual: system WIT disable fragility, field 404 on re-run, Deliverables picklist mismatches | Gap / residual |
-| **Observability / UX** | Per-script console/files; limited structured UI | Job events, Run timing, plan preview, `import-prevalidate` / failures / id-map artifacts | Improved / ported |
+| **Observability / UX** | Per-script console/files; limited structured UI | Job events, Run timing, plan preview, prevalidate / failures / id-map / backfill artifacts | Improved / ported |
 
 ### Known residual vs July
 
-- Not every July quirk is ported.
-- Catalog is **create-only** (July Script 5 resume/upsert patterns are only partially mirrored via id-map artifacts).
+- Not every July quirk is ported (state recovery paths, deprecated/deleted cascade filters, print/recovery-field options, etc.).
+- Catalog fields remain **create-only** (no bulk WIP upsert). Resume skips existing keys; it does not refresh field values.
+- No WIT `$batch` or native Boards CSV bulk path yet (further throughput option).
 - Inherited system WIT disable can still fail in the Process API (manual ADO UI fallback).
 - Re-run Process may log non-fatal `MSBPC.*` field 404s when org fields already exist (Update API is lock/undelete only).
 

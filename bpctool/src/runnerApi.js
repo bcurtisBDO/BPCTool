@@ -100,6 +100,7 @@ export function buildRunnerJobBody({
   steps = null,
   catalogLimit = null,
   convertMarkdownToHtml = false,
+  catalogParallelWorkers = 4,
 }) {
   return {
     org_url: orgUrl,
@@ -121,5 +122,9 @@ export function buildRunnerJobBody({
     steps,
     catalog_limit: catalogLimit,
     convert_markdown_to_html: Boolean(convertMarkdownToHtml),
+    catalog_parallel_workers: Math.max(
+      1,
+      Math.min(16, Number(catalogParallelWorkers) || 4),
+    ),
   }
 }

@@ -303,7 +303,7 @@ Project (and later project-phase steps) cannot start until process + layout succ
 | 3. Project Creation | `project` | Create project bound to process (or reuse existing); set/update optional description |
 | 4. Teams & Areas | `teams` | Create teams; area path tree; aggregate team area assignments (`includeChildren: false` unless Excel says otherwise) |
 | 5. Backlog Config | `backlog` | Rename/create backlog levels; assign WITs; set defaults; iteration paths; team backlog/iteration settings |
-| 6. Catalog Import | `catalog` | Import **all** matching catalog workbooks; Title 1..N parents; prevalidate; create-only work items |
+| 6. Catalog Import | `catalog` | Import **all** matching catalog workbooks; Title 1..N parents; prevalidate; parallel create + resume + parent-link backfill |
 | 7. Report | `report` | Write HTML/JSON summary under `runner-out/` |
 
 ### Template sheets that drive process & backlog
@@ -327,8 +327,10 @@ Catalog Import is **one step for all catalog content** in the configured folder�
 | **Keys** | Process sequence ID / Microsoft ID are stored on the work item and used as external keys for linking lookups; they do **not** derive the parent outline |
 | **Prevalidate** | Before create (and on dry-run): normalize multi-select tokens; **case-insensitive** picklist align to template casing; strip `Area Path` = `Not found`, Test Case `State` = `New`, invalid single picklist values (no match); apply Fields-sheet **Default value** when a required applicable field is empty; report remaining required-empty / unknown multi-select tokens → `import-prevalidate.json` |
 | **Description** | Spreadsheet Description mapped to `System.Description` only when non-empty; empty → field omitted (no synthetic “Imported from … row N”) |
-| **Create-only** | Successful creates are not updated on re-run. Rebuild hierarchy on a clean project (or delete prior imports) after fixing process/layout |
-| **Log stats** | `linked` / `missing parent` counts; warnings when a Title-outline parent key has no ADO id yet (usually parent create failed earlier) |
+| **Create-only fields** | Successful creates are not field-updated on re-run. Keys already in `ado-id-map.csv` are **skipped** (resume). Delete the map (or use a clean project) to recreate |
+| **Parallelism** | UI **Threads** (1–16, default 4) → `catalog_parallel_workers`. Parent-aware: children wait until the parent id exists. Start with 2–8 to limit ATCPU/429 |
+| **Parent-link backfill** | After create, verifies Hierarchy-Reverse for pairs in the id map; writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
+| **Log stats** | `created` / `skipped` / `linked` / `missing parent` / `failed` / worker count |
 | **Smoke tests** | API `catalog_limit` or apply dry-run to avoid a full ~15k-row live import |
 
 **System.State:** Allowed values come from each work item type’s process state model in Azure DevOps (not the template Picklists sheet). Catalog rows often send `New`; that is valid for many Agile-style types but **invalid for Test Case** (prevalidate strips it). **Business approval state** is a separate custom picklist.
@@ -368,12 +370,13 @@ Root: `bpctool/runner-out/<org>_<project>/`
 |----------|------|
 | `import-preview.csv` | Catalog step (including apply dry-run) — sample drafts |
 | `import-prevalidate.json` | Catalog picklist / area / state preflight counts + samples |
-| `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, `WorkItemType`, `Title`, `ParentKey`, `ParentId` |
+| `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, …; **appended** across runs for resume |
+| `backfill-links-report.csv` | Parent-link backfill statuses after catalog create |
 | `import-failures.json` | Live catalog create errors (key, WIT, title, parentKey, error, source) |
 | `bpc-ado-setup-summary.html` | Report step |
 | `bpc-ado-setup-summary.json` | Report step |
 
-`runner-out/` is gitignored. After a catalog run, check the event log for `Prevalidate: …` and `Catalog import finished: created …, linked …, missing parent …, failed …`. Every apply/simulate/API run ends with a **Run timing** block (per executed step + total).
+`runner-out/` is gitignored. After a catalog run, check the event log for `Prevalidate: …`, resume/worker messages, `Parent-link backfill…`, and `Catalog import finished: created …, skipped …, linked …`. Every apply/simulate/API run ends with a **Run timing** block (per executed step + total).
 
 ---
 
@@ -416,7 +419,8 @@ Via UI proxy: `/api/...`
   "apply_dry_run": true,
   "convert_markdown_to_html": false,
   "steps": null,
-  "catalog_limit": null
+  "catalog_limit": null,
+  "catalog_parallel_workers": 4
 }
 ```
 
@@ -428,6 +432,7 @@ Via UI proxy: `/api/...`
 | `convert_markdown_to_html` | Toolkit-style override; default `false` |
 | `steps` | Optional subset, e.g. `["backlog"]` or `["catalog","report"]` |
 | `catalog_limit` | Cap drafts for smoke tests |
+| `catalog_parallel_workers` | Parent-aware Catalog Import workers (1–16; UI **Threads**; default 4) |
 | `root_area_path` | Defaults to project name when omitted/empty in the UI |
 
 Apply jobs run in a background thread; poll `GET /jobs/{id}` until `status` is `succeeded` or `failed`.
@@ -469,9 +474,10 @@ React UI (Vite)
                       ├─ planner.py          IR → dry-run plan
                       ├─ richtext.py         HTML detect / optional MD→HTML
                       ├─ catalog_import.py   Drafts, Title 1..N parents, multiline flags
+                      ├─ catalog_runtime.py  Parallel create, id-map resume, parent backfill
                       ├─ catalog_validate.py Prevalidate / sanitize before create
                       ├─ mapping.py          Catalog headers → field refs
-                      ├─ ado_client.py       REST client + retries + Multivalue preflight
+                      ├─ ado_client.py       REST client + retries + Multivalue / parent links
                       ├─ org_url.py          Org URL normalize/parse
                       ├─ fs_browser.py       Path picker backend
                       ├─ apply_engine.py     Step orchestration (+ Multivalue gate)
@@ -485,6 +491,7 @@ Key design rules:
 - **DevLabs Multivalue extension is required** on the org before process / layout / project
 - Excel is authoring; IR is the run source of truth
 - Catalog parents follow Title outline; sequence IDs are keys only
+- Catalog create is parent-aware parallel + resume + Hierarchy-Reverse backfill
 - Multi-select uses July suggested-picklist + DevLabs Multivalue control pattern
 - Empty Description is omitted (not invented)
 - No subprocess calls to July scripts
@@ -577,7 +584,7 @@ Use the July **ADO template guideline** workbook, not a catalog file, as the tem
 
 ### Throttling (429 / 503)
 
-Runner retries with backoff. Reduce parallelism / rerun failed steps. Catalog import recovers by key where possible on retry-style failures during create.
+Runner retries with backoff. Reduce **Threads** / rerun Catalog Import — resume skips keys already in `ado-id-map.csv`. Review `backfill-links-report.csv` if hierarchy links are missing.
 
 ### Markdown shows as plain text in ADO
 
@@ -638,13 +645,13 @@ Process attempts to materialize then disable Excel-disabled WITs. If the API rej
 
 ### Catalog work items have no parent/child links
 
-Parent links follow **Title 1..N** (ADO CSV / [BPC import guidance](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops)), not Process sequence ID. Log warnings that show sequence-looking keys (e.g. `10.05.080.000`) are using those values as **row keys** when looking up the Title-outline parent — not as the hierarchy rule.
+Parent links follow **Title 1..N** (ADO CSV / [BPC import guidance](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops)), not Process sequence ID. Only Hierarchy-Reverse is created (same as July).
 
 If many items are unlinked:
 
-1. Check `import-failures.json` — a missing parent usually means that parent row **failed to create** earlier
-2. Confirm the log shows a large `linked` count on a fresh import
-3. Catalog is **create-only** — use a clean project (or delete prior imports) to rebuild the tree after fixing process/layout/picklists
+1. Check `import-failures.json` — children fail with `Parent not imported` when the parent never got an id
+2. Review `backfill-links-report.csv` — run Catalog again to resume creates and backfill missing links
+3. Confirm the log shows `linked` / backfill counts; for a full rebuild after process/layout fixes, use a clean project or delete prior imports + `ado-id-map.csv`
 
 ### Catalog fails on Application family / Products / picklists
 
@@ -703,13 +710,13 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - Disabling inherited system WITs via the public Process API can fail; manual disable in the ADO UI may still be required
 - `System.State` allowed values are owned by ADO process WIT models — not authored in the template Picklists sheet
 - Some Deliverables source columns (e.g. Job purpose / Job type / Data type) may not align with template picklists; prevalidate strips or reports but does not rewrite Microsoft source data
-- Catalog import of ~15k rows (all matching workbooks) is long-running; use apply dry-run + `catalog_limit` for smoke tests
-- Catalog import is **create-only** (no WIP/upsert merge against existing work items)
+- Catalog import of ~15k rows (all matching workbooks) is long-running; use apply dry-run + `catalog_limit` for smoke tests; tune **Threads** (2–8 typical)
+- Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links
 - Job store is in-memory; restarting the runner clears job history
 - Cancel in the UI stops client polling; it does not always hard-kill an in-flight apply thread
 - Some inherited layout surfaces can reject control updates; check layout warnings in the event log
 - Re-running Process may log `Field 'MSBPC.*' warning: ADO 404` when org-scoped fields already exist (Update API is lock/undelete only); fields remain usable — Layout binds them to WITs
-- **Simulate** / **API** modes remain for orchestration stubs and ADO reads; live apply is **Runner** only. UI fields `threads`, `maxRetries`, `layoutSheet`, and `backlogSheet` apply to Simulate/API, not runner jobs.
+- **Simulate** / **API** modes remain for orchestration stubs and ADO reads; live apply is **Runner** only. UI **Threads** also drives Catalog Import parallel workers; `maxRetries`, `layoutSheet`, and `backlogSheet` remain Simulate/API-oriented.
 
 ---
 
@@ -727,7 +734,8 @@ In the browser:
   4. Load runner defaults → Preview plan (check catalog files/rows)
   Apply dry-run UNCHECKED → Run for live ADO
   After run: check Run timing (per step + total) in the event log
-  After catalog: review import-prevalidate.json, ado-id-map.csv, import-failures.json
+  After catalog: review import-prevalidate.json, ado-id-map.csv,
+                 backfill-links-report.csv, import-failures.json
 ```
 
 Developer equivalent: `npm run setup` once, then `npm start` each session.
@@ -740,4 +748,5 @@ Defaults:
 - Markdown: preserved unless “Convert Markdown…to HTML” is checked
 - Empty Description: omitted (no synthetic import placeholder)
 - Run mode: Selected step only
-- Catalog parents: Title 1..N outline; Multi-select: suggested picklists + **required** DevLabs Multivalue extension
+- Threads: 4 (Catalog parallel workers; try 2–8)
+- Catalog parents: Title 1..N outline; resume + parent-link backfill; Multi-select: suggested picklists + **required** DevLabs Multivalue extension

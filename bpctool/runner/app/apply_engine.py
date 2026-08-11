@@ -186,6 +186,9 @@ def run_apply(
                     output_dir=output_dir,
                     limit=catalog_limit,
                     convert_markdown_to_html=bool(request.convert_markdown_to_html),
+                    parallel_workers=int(
+                        getattr(request, "catalog_parallel_workers", 4) or 4
+                    ),
                 )
             elif step_id == "report":
                 result = apply_report(

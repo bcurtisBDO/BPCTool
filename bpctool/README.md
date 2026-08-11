@@ -13,7 +13,7 @@ Excel remains the authoring format. The runner parses workbooks into an intermed
 |-----|----------|
 | **[USER_GUIDE.md](./USER_GUIDE.md)** | Requirements, install, step-by-step usage, modes, Excel sheets, API, troubleshooting |
 | **[CHANGELOG.md](./CHANGELOG.md)** | What changed in the standalone rebuild and later releases |
-| **[docs/workflow-and-july-comparison.md](./docs/workflow-and-july-comparison.md)** | Workflow steps, ADO APIs per step, July scripts vs BPCTool |
+| **[docs/workflow-and-july-comparison.md](./docs/workflow-and-july-comparison.md)** | Workflow steps, ADO APIs, catalog parallel/resume/backfill, July scripts vs BPCTool |
 | **[docs/reference/](./docs/reference/)** | Post-create process template analysis (e.g. MSBPC Jul 2026) |
 
 ---
@@ -40,6 +40,28 @@ npm start       # UI + auto-started runner (opens browser)
 ```
 
 Advanced: `npm run runner` still starts only the API if you need it alone. Prefer `npm start` so Vite replaces a stale process on port `8787` and enables `--reload`.
+
+---
+
+## Screenshots
+
+Sample UI (local Runner mode). Paths and names in the shots are illustrative.
+
+### Connection (org URL, PAT, Multivalue preflight)
+
+![Connection panel with Multivalue extension check](./docs/images/ui-connection.png)
+
+### Workflow steps
+
+![Seven workflow cards from Process Template through Report](./docs/images/ui-workflow.png)
+
+### Run configuration (template, catalog folder)
+
+![Template and catalog path pickers](./docs/images/ui-run-config.png)
+
+### Catalog workers and run actions
+
+![Threads control for Catalog Import parallel workers, dry-run, and Run buttons](./docs/images/ui-actions.png)
 
 ---
 
@@ -74,7 +96,7 @@ Artifacts: `runner-out/<org>_<project>/`
 3. Project create/bind (optional user description)
 4. Teams & areas (multi-path team assignments)
 5. Backlog & iterations (levels from **Backlogs** sheet + WIT mapping + team iterations)
-6. Catalog import (all matching workbooks in the catalog folder — BPC, Deliverables, Objectives, SbD, etc.)
+6. Catalog import (parallel + resume + parent-link backfill; all matching workbooks in the catalog folder)
 7. HTML/JSON report
 
 ## Execution modes
@@ -102,6 +124,7 @@ Artifacts: `runner-out/<org>_<project>/`
 - **DevLabs Multivalue extension is required** on the org for process / layout / project (Connection preflight + Run install prompt; Marketplace/admin if PAT cannot install)
 - **Catalog Import** loads every matching `.xlsx` in the catalog folder (not only Business Process Catalog); parent links follow **Title 1..N** (ADO CSV outline), not Process sequence ID
 - Catalog **prevalidate**: strip hard-fail values, apply Fields-sheet defaults, **case-insensitive** picklist align → `import-prevalidate.json`
+- Catalog **parallel create** (UI Threads), **resume** via `ado-id-map.csv`, **parent-link backfill** → `backfill-links-report.csv`
 - Empty spreadsheet **Description** → no `System.Description` on create (no “Imported from … row N” text)
 - Org URL accepts `dev.azure.com/{org}`, `{org}.visualstudio.com`, or bare org name
 
@@ -116,13 +139,14 @@ Details: [USER_GUIDE.md §8](./USER_GUIDE.md#8-rich-text-html-vs-markdown).
 
 ## Catalog & artifacts (quick)
 
-Catalog is **create-only** (no in-place upsert). Typical outputs under `runner-out/<org>_<project>/`:
+Catalog is **create-only for fields** (no in-place upsert). Re-runs **resume** from `ado-id-map.csv`. Typical outputs under `runner-out/<org>_<project>/`:
 
 | File | Role |
 |------|------|
 | `import-preview.csv` | Sample drafts (also on apply dry-run) |
 | `import-prevalidate.json` | Preflight counts (incl. `picklist_case_normalized`, defaults, strips) |
-| `ado-id-map.csv` | Created ids + `ParentKey` / `ParentId` |
+| `ado-id-map.csv` | Created ids + resume map (`ParentKey` / `ParentId`) |
+| `backfill-links-report.csv` | Parent-link backfill statuses |
 | `import-failures.json` | Per-row ADO create errors |
 
 Full usage and troubleshooting: [USER_GUIDE.md §9](./USER_GUIDE.md#9-workflow-steps-engine) and [§15](./USER_GUIDE.md#15-troubleshooting).

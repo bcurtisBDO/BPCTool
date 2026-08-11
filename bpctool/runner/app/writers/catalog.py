@@ -7,8 +7,14 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from ..ado_client import AdoClient, AdoError
+from ..ado_client import AdoClient
 from ..catalog_import import load_catalog_drafts
+from ..catalog_runtime import (
+    backfill_parent_links,
+    clamp_parallel_workers,
+    import_drafts_parent_aware,
+    load_id_map,
+)
 from ..catalog_validate import prevalidate_catalog_drafts, prevalidate_summary
 from ..mapping import build_mapping_from_ir
 
@@ -24,16 +30,20 @@ def apply_catalog(
     output_dir: Path,
     limit: int | None = None,
     convert_markdown_to_html: bool = False,
+    parallel_workers: int | None = None,
 ) -> dict[str, Any]:
     project = ir["targets"]["project_name"]
     catalog_dir = ir["source"].get("catalog_source_dir")
-    stats = {
+    workers = clamp_parallel_workers(parallel_workers)
+    stats: dict[str, Any] = {
         "drafts": 0,
         "created": 0,
         "skipped": 0,
         "failed": 0,
         "linked": 0,
         "missing_parent": 0,
+        "backfill": {},
+        "parallel_workers": workers,
         "prevalidate": {},
         "html_fields_normalized": 0,
         "markdown_preserved": 0,
@@ -104,7 +114,9 @@ def apply_catalog(
                     "Key": draft.key,
                     "WorkItemType": draft.work_item_type,
                     "Title": draft.title,
-                    "DescriptionFormat": draft.content_formats.get("System.Description", ""),
+                    "DescriptionFormat": draft.content_formats.get(
+                        "System.Description", ""
+                    ),
                     "DescriptionSample": description[:240],
                     "SourceFile": draft.source_file,
                     "SourceRow": draft.source_row,
@@ -144,91 +156,57 @@ def apply_catalog(
         emit("catalog", f"Prevalidate: no issues ({prevalidate_path.name})")
 
     if dry_run:
+        existing = load_id_map(id_map_path)
+        remaining = sum(1 for d in drafts if d.key not in existing)
         emit(
             "catalog",
             f"[dry-run] Preview written ({preview_path.name}); "
-            f"would import {len(drafts)} work items "
+            f"would import {remaining} of {len(drafts)} work items "
+            f"({len(existing)} already in id-map) with {workers} worker(s), "
             + (
-                "with markdown converted to HTML"
+                "markdown→HTML, "
                 if convert_markdown_to_html
-                else "preserving markdown (multilineFieldsFormat=Markdown)"
-            ),
+                else "preserving markdown (multilineFieldsFormat=Markdown), "
+            )
+            + "then parent-link backfill",
         )
+        stats["skipped"] = len(existing)
         stats["id_map_path"] = str(preview_path)
         return stats
 
-    id_map: dict[str, int] = {}
-    failures: list[dict[str, Any]] = []
-    parent_ids: dict[str, int] = {}
+    id_map = load_id_map(id_map_path)
+    id_map, failures, create_stats = import_drafts_parent_aware(
+        client,
+        drafts,
+        project=project,
+        id_map=id_map,
+        id_map_path=id_map_path,
+        parallel_workers=workers,
+        emit=emit,
+    )
+    stats.update(create_stats)
 
-    with id_map_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["Key", "WorkItemId", "WorkItemType", "Title", "ParentKey", "ParentId"],
-        )
-        writer.writeheader()
-
-        for index, draft in enumerate(drafts, start=1):
-            parent_id = parent_ids.get(draft.parent_key) if draft.parent_key else None
-            if draft.parent_key and parent_id is None:
-                stats["missing_parent"] += 1
-                if stats["missing_parent"] <= 20:
-                    emit(
-                        "catalog",
-                        f"WARNING: Title-outline parent key '{draft.parent_key}' "
-                        f"has no ADO id yet for '{draft.key}' "
-                        f"({draft.work_item_type}) — creating unlinked "
-                        f"(parent create likely failed earlier; keys are "
-                        f"Process sequence ID, not the hierarchy rule)",
-                    )
-            try:
-                created = client.create_work_item(
-                    project,
-                    draft.work_item_type,
-                    draft.fields,
-                    parent_id=parent_id,
-                    dry_run=False,
-                    markdown_format_fields=draft.markdown_format_fields,
-                )
-                work_item_id = int(created["id"])
-                id_map[draft.key] = work_item_id
-                parent_ids[draft.key] = work_item_id
-                if parent_id is not None:
-                    stats["linked"] += 1
-                writer.writerow(
-                    {
-                        "Key": draft.key,
-                        "WorkItemId": work_item_id,
-                        "WorkItemType": draft.work_item_type,
-                        "Title": draft.title,
-                        "ParentKey": draft.parent_key or "",
-                        "ParentId": parent_id or "",
-                    }
-                )
-                stats["created"] += 1
-            except (AdoError, KeyError, TypeError, ValueError) as exc:
-                stats["failed"] += 1
-                failures.append(
-                    {
-                        "key": draft.key,
-                        "workItemType": draft.work_item_type,
-                        "title": draft.title,
-                        "parentKey": draft.parent_key,
-                        "error": str(exc),
-                        "sourceFile": draft.source_file,
-                        "sourceRow": draft.source_row,
-                    }
-                )
-
-            if index % 100 == 0:
-                emit("catalog", f"Imported {index}/{len(drafts)} work items...")
+    backfill_stats = backfill_parent_links(
+        client,
+        drafts,
+        id_map,
+        project=project,
+        output_dir=output_dir,
+        emit=emit,
+    )
+    stats["backfill"] = backfill_stats
+    # Count backfill links toward linked when create missed the relation.
+    stats["linked"] = int(stats.get("linked") or 0) + int(
+        backfill_stats.get("linked") or 0
+    )
 
     failures_path.write_text(json.dumps(failures, indent=2), encoding="utf-8")
     stats["id_map_path"] = str(id_map_path)
     emit(
         "catalog",
         f"Catalog import finished: created {stats['created']}, "
-        f"linked {stats['linked']}, missing parent {stats['missing_parent']}, "
-        f"failed {stats['failed']}",
+        f"skipped {stats['skipped']}, linked {stats['linked']}, "
+        f"missing parent {stats['missing_parent']}, failed {stats['failed']}, "
+        f"workers {workers}",
     )
     return stats

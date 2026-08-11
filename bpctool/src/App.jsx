@@ -924,6 +924,7 @@ function App() {
             applyDryRun: dryRun,
             steps: plannedSteps.length ? plannedSteps : null,
             convertMarkdownToHtml,
+            catalogParallelWorkers: parseBoundedInt(threads, 4),
           }),
           {
             signal: abortController.signal,
@@ -1491,6 +1492,10 @@ function App() {
               }
               disabled={isRunning}
             />
+            <span className="field-hint">
+              Catalog Import parallel workers (Runner). Start with 2–8; 1 =
+              serial. Also used by Simulate/API layout stubs.
+            </span>
           </label>
           <label className="span-2">
             Retry count

@@ -308,3 +308,56 @@ class AdoClient:
             json_body=patch,
             content_type="application/json-patch+json",
         )
+
+    def get_parent_id(self, project: str, work_item_id: int) -> int | None:
+        """Return Hierarchy-Reverse parent id, or None if unlinked."""
+        data = (
+            self.request(
+                "GET",
+                f"/_apis/wit/workItems/{int(work_item_id)}?$expand=Relations",
+                project=project,
+                api_version="7.1",
+            )
+            or {}
+        )
+        for relation in data.get("relations") or []:
+            if relation.get("rel") == "System.LinkTypes.Hierarchy-Reverse":
+                url = str(relation.get("url") or "").rstrip("/")
+                if not url:
+                    continue
+                try:
+                    return int(url.split("/")[-1])
+                except ValueError:
+                    continue
+        return None
+
+    def add_parent_link(
+        self,
+        project: str,
+        child_id: int,
+        parent_id: int,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        parent_url = self.url(f"/_apis/wit/workItems/{int(parent_id)}", project=project)
+        parent_url = parent_url.split("?")[0]
+        patch = [
+            {
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "url": parent_url,
+                    "attributes": {"comment": "Backfilled imported parent link"},
+                },
+            }
+        ]
+        if dry_run:
+            return {"id": child_id, "parentId": parent_id, "patch": patch}
+        return self.request(
+            "PATCH",
+            f"/_apis/wit/workitems/{int(child_id)}",
+            project=project,
+            json_body=patch,
+            content_type="application/json-patch+json",
+        )

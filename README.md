@@ -19,6 +19,8 @@ In the browser: set org URL + PAT → confirm **Multivalue: installed** (or inst
 
 **Required org extension:** [Multivalue control (Microsoft DevLabs)](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) — needed for Multi-select fields and for process / layout / project setup. The Connection panel checks the org and can install via API when the PAT allows; otherwise install as an org admin.
 
+UI screenshots (Connection, workflow cards, run config, Catalog Threads): see [`bpctool/README.md`](./bpctool/README.md#screenshots).
+
 ## Docs
 
 | Doc | Purpose |
@@ -26,7 +28,7 @@ In the browser: set org URL + PAT → confirm **Multivalue: installed** (or inst
 | [`bpctool/README.md`](./bpctool/README.md) | Launch, checklist, workflow, modes |
 | [`bpctool/USER_GUIDE.md`](./bpctool/USER_GUIDE.md) | Full usage, API, troubleshooting |
 | [`bpctool/CHANGELOG.md`](./bpctool/CHANGELOG.md) | Release history |
-| [`bpctool/docs/workflow-and-july-comparison.md`](./bpctool/docs/workflow-and-july-comparison.md) | Workflow steps, APIs, July scripts vs BPCTool |
+| [`bpctool/docs/workflow-and-july-comparison.md`](./bpctool/docs/workflow-and-july-comparison.md) | Workflow, APIs, catalog parallel/resume/backfill, July vs BPCTool |
 | [`bpctool/docs/reference/`](./bpctool/docs/reference/) | Process template after creation (MSBPC Jul 2026 analysis) |
 
 ## Layout

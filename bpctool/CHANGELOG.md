@@ -2,6 +2,22 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Docs: README UI screenshots
+
+- Added `docs/images/` screenshots (Connection / Multivalue, workflow cards, run config, Catalog Threads + actions) linked from [`README.md`](./README.md#screenshots)
+
+## 2026-08 — Docs: catalog parallel / resume / backfill
+
+- [`docs/workflow-and-july-comparison.md`](./docs/workflow-and-july-comparison.md) updated for Catalog Import assessment (parallel workers, id-map resume, parent-link backfill, hierarchy-only relations, residual vs July)
+- USER_GUIDE / README job field `catalog_parallel_workers`, artifacts, troubleshooting, quick reference
+
+## 2026-08 — Catalog: parallel create, resume, parent-link backfill
+
+- Catalog Import uses **parent-aware parallel workers** (UI **Threads**, default 4; clamp 1–16; July-style ready queue)
+- **Resume** from existing `ado-id-map.csv` (skip keys already imported; append new rows)
+- After create, **parent-link backfill** checks Hierarchy-Reverse and writes `backfill-links-report.csv` (link / already_linked / conflict / failed)
+- Children wait until the parent id exists (no create-unlinked when parent failed — counted as `Parent not imported`)
+
 ## 2026-08 — Docs: Multivalue required + catalog notes
 
 - Root README, app README, USER_GUIDE, and residual-risk notes state that DevLabs **Multivalue** is **required** for process / layout / project
@@ -196,19 +212,19 @@ API surface:
 ### Explicitly not done / residual risk
 
 - **DevLabs Multivalue extension is required** for process / layout / project; UI/runner preflight + optional install via Extension Management API; Marketplace/admin if PAT cannot install
+- Catalog Import: parent-aware parallel workers + id-map resume + parent-link backfill (July-aligned); still create-only (no WIP field upsert)
 - Not every July script edge case is ported
 - Inherited system WIT disable via Process API can still fail (manual ADO UI fallback)
-- Catalog is create-only (no WIP upsert); hierarchy rebuild needs a clean project after process/layout fixes
 - Empty catalog Description omits `System.Description` (no synthetic placeholder)
 - In-memory jobs only (lost on runner restart)
 - UI cancel stops client polling; does not always kill an in-flight apply thread
-- Large catalog imports (~15k rows across all matching workbooks) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests
+- Large catalog imports (~15k rows across all matching workbooks) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests; start Threads at 2–8 to limit ATCPU/429
 - Process re-run may log non-fatal `MSBPC.*` field 404 warnings when org fields already exist (Update API is lock/undelete only)
 
 ### Optional surfaces still wired (not primary path)
 
 - **Simulate** / **API** execution modes (stubs / ADO reads); Runner is the apply path
-- UI fields `threads`, `maxRetries`, `layoutSheet`, `backlogSheet` (Simulate/API only)
+- UI fields `threads` (also Catalog Import parallel workers in Runner), `maxRetries`, `layoutSheet`, `backlogSheet` (`maxRetries` / sheet names remain Simulate/API-oriented)
 - `POST /ir/parse` (manual API; UI does not call it)
 - `npm run runner` / `runner:install` (prefer `npm start` + Vite plugin)
 
