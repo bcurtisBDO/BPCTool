@@ -580,9 +580,10 @@ function App() {
   /**
    * Gate process / layout / project runs on Multivalue extension presence.
    * Prompts to install when missing; blocks if declined or install fails.
+   * Skipped for Simulate and Apply dry-run (no ADO mutations; matches runner).
    */
   const ensureMultivalueExtensionForSetup = async () => {
-    if (executionMode === 'simulate') {
+    if (executionMode === 'simulate' || dryRun) {
       return true
     }
     if (!stepsRequireMultivalueExtension(plannedStepIds)) {
