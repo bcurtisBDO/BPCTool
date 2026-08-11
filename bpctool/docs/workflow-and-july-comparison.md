@@ -4,6 +4,8 @@ Engine order from `STEP_ORDER` in `runner/app/planner.py`. ADO paths via runner 
 
 BPCTool does **not** spawn those scripts — it reimplements the intent with Excel → IR → plan → apply.
 
+**Assessment date:** 2026-08-11. Catalog ops and template matrix (`X` / `H`) match July Script 2 / Phase 5 behavior as summarized below.
+
 ---
 
 ## Workflow diagram
@@ -33,6 +35,32 @@ Multivalue preflight (extmgmt)
 
 Recommended hard sequence (planner): `process → layout → verify → project → teams → backlog → catalog → report`.
 
+### Execution modes (UI)
+
+| Mode | Role |
+|------|------|
+| **Runner** (default) | Live Excel → IR → plan → apply via local FastAPI (`/api/jobs`) |
+| **API** | Live ADO **reads** only (`/ado-proxy`) — credential proof / inventory; not process/layout/catalog apply |
+| **Simulate** | Local stubs for orchestration testing |
+
+Catalog/report have no API-mode executor; setup apply is Runner-only.
+
+---
+
+## Template matrix: X vs H (current assessment)
+
+On the July **ADO template guideline** workbook, sheet **Work item types**, cells in the field-label grid (roughly `K2:FU44`) mark which fields apply to each WIT.
+
+| Flag | July Script 2 | BPCTool (`excel_ir` / layout) |
+|------|---------------|-------------------------------|
+| **X** | Applicable — add field to WIT and place layout control | Same — collected into `applicable_field_labels` |
+| **H** | Ignored (not `"X"`) — no add / no layout bind | Same — skipped |
+| empty / other | Skipped | Skipped |
+
+July only continues when `wit_field_flags.get(field_label) == "X"`. There is no special path for `H`. In the July guideline file, `H` is rare vs `X` and typically marks **system effort/build fields** (e.g. Completed Work, Activity, Original Estimate) as present/hidden on the type for authors — **not** an instruction for the layout script.
+
+**Verdict:** Parity — both tools treat only `X` as actionable for process/layout field binding.
+
 ---
 
 ## Catalog Import (current assessment)
@@ -46,7 +74,7 @@ Aligned with July Phase 5 on the operational import model; still create-only for
 | **Resume** | Load existing `ado-id-map.csv`; skip keys already imported; append new rows |
 | **Parent-link backfill** | After create, `GET` relations + `PATCH` missing Hierarchy-Reverse; writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
 | **Failures** | If a parent never imports, children fail with `Parent not imported` (not created unlinked) |
-| **Prevalidate** | Local sanitize before create (`import-prevalidate.json`) |
+| **Prevalidate** | Local sanitize before create (`import-prevalidate.json`): strip bad Area Path / Test Case State=New, case-insensitive picklist normalize, required-field defaults, empty Description omitted (no synthetic placeholder) |
 | **Not done** | WIT `$batch` / native CSV bulk upload; HTTP connection pooling; WIP field upsert against existing work items |
 
 **Performance note:** Parallel workers cut wall time vs the former 1×N serial create loop (often several× when network-bound). Start at 2–8 workers; higher counts risk ATCPU/429. Chunked WIT `$batch` would reduce round-trips further but is not implemented.
@@ -118,6 +146,7 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 | **Orchestration** | `setup_wizard` shells out to six `.py` scripts via env vars (subprocess) | In-process writers in local FastAPI runner; React UI posts `/api/jobs` and polls events | Improved / ported |
 | **Sequence** | Phase 1 creates process + project together; layout is a later phase | Hard gate **process → layout → project** (layout before any project on full runs) | Improved / ported |
 | **Excel handling** | Each script re-reads Excel during mutation | Parse once to IR → plan → apply; fingerprint + dry-run plan preview | Improved / ported |
+| **WIT×field matrix (`X`/`H`)** | Script 2: only `X` adds field/layout; `H` ignored | IR/`applicable_field_labels`: only `X`; `H` ignored | Parity |
 | **Multivalue extension** | Layout binds Multivalue; install often assumed / Marketplace-manual | **Required** for process/layout/project; Connection check + optional API install; dry-run skips gate | Stricter |
 | **Process / fields / picklists** | Script 1 creates inherited process, WITs, fields, picklists | Ported via `apply_process`; multi-select → suggested picklists (`isSuggested`) | Improved / ported |
 | **Page layout** | Script 2 threaded layout + DevLabs MultivalueContribution | `apply_layout` mirrors Script 2 patterns (HTML group create, control retries) | Improved / ported |
@@ -127,8 +156,10 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 | **Catalog parallelism** | `--catalog-parallel-workers` parent-aware pool | UI **Threads** / `catalog_parallel_workers` parent-aware pool | Improved / ported |
 | **Catalog resume** | Skip keys in `ado-id-map.csv` on rerun | Same append/skip resume model | Improved / ported |
 | **Catalog parent backfill** | `backfill-links` CLI (+ statuses) | Automatic post-create backfill → `backfill-links-report.csv` | Improved / ported |
+| **Catalog prevalidate** | Phase 5 sanitizes / maps before create | Local prevalidate + case-insensitive picklist rewrite; empty Description omitted | Improved / ported |
 | **Catalog field updates** | Create/import mode; limited recovery updates | Create-only fields (no WIP upsert) | Near parity / residual |
 | **Report** | Script 6 HTML summary from artifacts | Local HTML/JSON under `runner-out/` (no ADO calls) | Improved / ported |
+| **UI execution modes** | N/A (CLI scripts) | Runner = apply; API = reads only; Simulate = stubs | Improved / ported |
 | **Edge-case parity** | Full script surface + many ADO quirk workarounds | July-shaped, not line-for-line; residual: system WIT disable fragility, field 404 on re-run, Deliverables picklist mismatches | Gap / residual |
 | **Observability / UX** | Per-script console/files; limited structured UI | Job events, Run timing, plan preview, prevalidate / failures / id-map / backfill artifacts | Improved / ported |
 
@@ -136,7 +167,7 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 
 - Not every July quirk is ported (state recovery paths, deprecated/deleted cascade filters, print/recovery-field options, etc.).
 - Catalog fields remain **create-only** (no bulk WIP upsert). Resume skips existing keys; it does not refresh field values.
-- No WIT `$batch` or native Boards CSV bulk path yet (further throughput option).
+- No WIT `$batch` or native Boards CSV bulk path yet (further throughput option). No HTTP connection pooling on the runner client yet.
 - Inherited system WIT disable can still fail in the Process API (manual ADO UI fallback).
 - Re-run Process may log non-fatal `MSBPC.*` field 404s when org fields already exist (Update API is lock/undelete only).
 

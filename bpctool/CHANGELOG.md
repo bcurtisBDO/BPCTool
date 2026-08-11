@@ -2,6 +2,10 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Docs: workflow & July comparison (current assessment)
+
+- [`docs/workflow-and-july-comparison.md`](./docs/workflow-and-july-comparison.md): assessment date; template matrix **X vs H** parity; UI Runner/API/Simulate; Catalog parallel/resume/backfill + prevalidate notes; comparison table rows for matrix / prevalidate / execution modes
+
 ## 2026-08 — Docs: README UI screenshots
 
 - Added `docs/images/` screenshots (Connection / Multivalue, workflow cards, run config, Catalog Threads + actions) linked from [`README.md`](./README.md#screenshots)

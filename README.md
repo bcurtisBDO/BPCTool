@@ -28,7 +28,7 @@ UI screenshots (Connection, workflow cards, run config, Catalog Threads): see [`
 | [`bpctool/README.md`](./bpctool/README.md) | Launch, checklist, workflow, modes |
 | [`bpctool/USER_GUIDE.md`](./bpctool/USER_GUIDE.md) | Full usage, API, troubleshooting |
 | [`bpctool/CHANGELOG.md`](./bpctool/CHANGELOG.md) | Release history |
-| [`bpctool/docs/workflow-and-july-comparison.md`](./bpctool/docs/workflow-and-july-comparison.md) | Workflow, APIs, catalog parallel/resume/backfill, July vs BPCTool |
+| [`bpctool/docs/workflow-and-july-comparison.md`](./bpctool/docs/workflow-and-july-comparison.md) | Workflow, X vs H matrix, catalog parallel/resume/backfill, July vs BPCTool |
 | [`bpctool/docs/reference/`](./bpctool/docs/reference/) | Process template after creation (MSBPC Jul 2026 analysis) |
 
 ## Layout
