@@ -2,6 +2,11 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Docs: audit sync (re-run semantics + X vs H)
+
+- USER_GUIDE: Work item types matrix **`X` only** (`H` ignored); §10 table for what subsequent spreadsheet runs update (catalog create-only / resume)
+- Repo docs already covered Catalog parallel/resume/backfill, Multivalue required, empty Description, picklist case-normalize; workflow comparison + indexes dated 2026-08-11
+
 ## 2026-08 — Docs: workflow & July comparison (current assessment)
 
 - [`docs/workflow-and-july-comparison.md`](./docs/workflow-and-july-comparison.md): assessment date; template matrix **X vs H** parity; UI Runner/API/Simulate; Catalog parallel/resume/backfill + prevalidate notes; comparison table rows for matrix / prevalidate / execution modes

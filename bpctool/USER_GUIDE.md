@@ -310,7 +310,7 @@ Project (and later project-phase steps) cannot start until process + layout succ
 
 | Sheet | Role |
 |-------|------|
-| **Work item types** | WIT definitions; `Custom work item type = Disabled` for Epic / Feature / User story; `Backlog name` maps enabled WITs to levels; `State` column is field applicability (`X`), **not** allowed System.State values |
+| **Work item types** | WIT definitions; `Custom work item type = Disabled` for Epic / Feature / User story; `Backlog name` maps enabled WITs to levels; field-label grid marks applicability with **`X` only** (`H` and blanks are ignored — same as July Script 2). A **State** grid column (if present) means the State *field* applies to that WIT — it is **not** a list of allowed `System.State` values |
 | **Backlogs** | Level names, type, color, default WIT, **Rename from** (`Epic`, `Feature`, `(new)`, `(rename)`) |
 | **Fields** / **Picklists** | Custom fields and lists; **Multi-select field = Yes** → suggested picklist + multivalue UI (Application family, Products, Industries, …) |
 | **Area paths** / **Teams** | Hierarchy + team mappings (July L1–L4 style; project column skipped) |
@@ -357,6 +357,16 @@ If an older apply created custom **Levels** / **Lowest** while leaving system **
 - **Workbook version** label + file bytes produce a fingerprint
 - Successful process applies can record the fingerprint in `localStorage` (`bpcWorkbookApplies`)
 - When the workbook changes for the same org/process, the UI surfaces that a spreadsheet delta update is appropriate
+
+**What a re-run actually updates** (updated spreadsheet ≠ full overwrite):
+
+| Step | On subsequent run |
+|------|-------------------|
+| **Process / layout** | Adds missing WITs/fields/controls; limited field metadata PATCH; not a full process rewrite |
+| **Project** | Reuses existing; updates description when the UI field is non-empty |
+| **Teams / backlog** | Upsert/heal areas, behaviors, iterations, assignments |
+| **Catalog** | **Create-only fields** — keys in `ado-id-map.csv` are skipped (no WIP field refresh). New keys create; parent-link backfill can still fix missing Hierarchy-Reverse |
+| **Report** | Regenerates local HTML/JSON |
 
 Use a clear version label (e.g. `JUL-2026`) whenever you switch template revisions.
 
