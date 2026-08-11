@@ -2,6 +2,27 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-08 — Docs: Multivalue required + catalog notes
+
+- Root README, app README, USER_GUIDE, and residual-risk notes state that DevLabs **Multivalue** is **required** for process / layout / project
+- Documented empty Description omit, case-insensitive picklist prevalidate, `/extmgmt-proxy`, and Connection Check/Install
+
+## 2026-08 — Catalog: no synthetic Description
+
+- Catalog import no longer invents `System.Description` when the spreadsheet Description is empty (removed “Imported from … row N” placeholder)
+
+## 2026-08 — Picklist case-insensitive prevalidate
+
+- Catalog prevalidate matches single- and multi-select picklist values **case-insensitively** and rewrites to the template Picklists-sheet casing (e.g. `Organization Administration` → `Organization administration` for `MSBPC.module`)
+- Counted as `picklist_case_normalized` in `import-prevalidate.json` (no longer stripped as `invalid_picklist_value`)
+
+## 2026-08 — DevLabs Multivalue extension preflight
+
+- Connection panel checks whether `ms-devlabs.vsts-extensions-multivalue-control` is installed on the org (via Extension Management API)
+- If missing, Run prompts to install with the current PAT; decline or install failure blocks process / layout / project setup
+- Live runner apply also requires the extension before those steps (defense in depth)
+- Vite `/extmgmt-proxy` → `extmgmt.dev.azure.com`
+
 ## 2026-08 — Reference: post-create process analysis
 
 - Added [`docs/reference/MSBPC-Jul26-analysis.md`](./docs/reference/MSBPC-Jul26-analysis.md) — WIT/states/fields snapshot of process `MSBPCTemplate` after template apply
@@ -38,8 +59,8 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 ## 2026-08 — Multi-value picklists + catalog prevalidate
 
 - Fields marked **Multi-select** (Application family, Products, Industries, …) create July-style **suggested** picklists (`isSuggested` / `isPicklistSuggested`) so semicolon-separated values import
-- Layout binds DevLabs **Multivalue** control for those fields (falls back to native picklist if the extension is missing)
-- Catalog **prevalidate** before create: strip `Area Path=Not found`, strip Test Case `State=New`, strip invalid single picklist values, normalize multi-select tokens; writes `import-prevalidate.json`
+- Layout binds DevLabs **Multivalue** control for those fields (later: extension **required** via Connection/runner preflight — see Multivalue preflight entry above; no longer “optional fallback”)
+- Catalog **prevalidate** before create: strip `Area Path=Not found`, strip Test Case `State=New`, strip invalid single picklist values, normalize multi-select tokens; writes `import-prevalidate.json` (later: case-insensitive picklist align — see picklist entry above)
 - Module: `catalog_validate.py`; tests for prevalidate, multiselect labels, layout control type
 
 ## 2026-08 — Catalog parent links (Title outline)
@@ -174,13 +195,15 @@ API surface:
 
 ### Explicitly not done / residual risk
 
-- DevLabs Multivalue **marketplace install** is still manual (layout binds the control when Multi-select=Yes)
+- **DevLabs Multivalue extension is required** for process / layout / project; UI/runner preflight + optional install via Extension Management API; Marketplace/admin if PAT cannot install
 - Not every July script edge case is ported
 - Inherited system WIT disable via Process API can still fail (manual ADO UI fallback)
 - Catalog is create-only (no WIP upsert); hierarchy rebuild needs a clean project after process/layout fixes
+- Empty catalog Description omits `System.Description` (no synthetic placeholder)
 - In-memory jobs only (lost on runner restart)
 - UI cancel stops client polling; does not always kill an in-flight apply thread
 - Large catalog imports (~15k rows across all matching workbooks) are long-running; use `apply_dry_run` / `catalog_limit` for smoke tests
+- Process re-run may log non-fatal `MSBPC.*` field 404 warnings when org fields already exist (Update API is lock/undelete only)
 
 ### Optional surfaces still wired (not primary path)
 

@@ -11,7 +11,7 @@ For a short overview, see [README.md](./README.md). For release history, see [CH
 BPCTool configures an Azure DevOps organization for the Microsoft Business Process Catalog pattern:
 
 1. Create/update an **inherited process** from the July ADO template workbook
-2. Apply **page layouts** (including HTML field controls) **before** any project exists
+2. Apply **page layouts** (including HTML field controls and DevLabs Multivalue for Multi-select) **before** any project exists — requires the Multivalue extension on the org
 3. Create/bind a **project** to that process (optional description)
 4. Upsert **teams** and **area paths** (including multi-path team assignments)
 5. Configure **backlog levels**, **WIT→backlog mapping**, **iteration paths**, and **team iteration settings**
@@ -40,8 +40,9 @@ Excel remains the authoring format. A local FastAPI runner parses workbooks into
 | Item | Notes |
 |------|-------|
 | Organization URL | `https://dev.azure.com/{org}`, `https://{org}.visualstudio.com`, or bare `{org}` (normalized to `https://dev.azure.com/{org}`) |
-| PAT | Personal Access Token with scopes sufficient to manage processes, projects, work items, and teams. Typically: **Work Items (Read & Write)**, **Project and Team (Read & Write)**, **Identity (Read)**. Process customization may require organization-level permissions. |
+| PAT | Personal Access Token with scopes sufficient to manage processes, projects, work items, and teams. Typically: **Work Items (Read & Write)**, **Project and Team (Read & Write)**, **Identity (Read)**. Process customization may require organization-level permissions. To **install** the Multivalue extension from the UI, the account/PAT must be able to manage organization extensions (often org owner/admin). |
 | Permissions | Ability to create inherited processes and projects in the target org |
+| **Multivalue extension (required)** | [Multivalue control (Microsoft DevLabs)](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) (`ms-devlabs.vsts-extensions-multivalue-control`) **must** be installed and enabled on the organization before process template, page layout, and project setup. Connection auto-checks; Run prompts to install if missing. Without it, those steps are blocked. |
 
 ### Input files
 
@@ -63,6 +64,7 @@ Vite proxies:
 
 - `/api/*` → runner (`8787`)
 - `/ado-proxy/*` → `https://dev.azure.com`
+- `/extmgmt-proxy/*` → `https://extmgmt.dev.azure.com` (extension install/check)
 - `/fs/*` → local filesystem browser (path picker)
 
 ---
@@ -129,6 +131,7 @@ Double-click **Start BPCTool** and wait for the browser to open.
    - **PAT** — kept in this browser session only (not persisted to disk); the field uses the full panel width
 3. Confirm **Execution mode** is **Runner** (default)
 4. Wait until the status chip shows **Ready**
+5. Confirm **Multivalue: installed** (required). If **missing**, use **Install Multivalue extension** or install from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) as an org admin, then **Check** again. Process / layout / project runs are blocked until it is installed and enabled.
 
 Optional but recommended:
 
@@ -218,6 +221,7 @@ Check **Apply dry-run**, run the flow, and inspect preview artifacts (`import-pr
 | Org URL | Accepts `dev.azure.com/{org}`, `{org}.visualstudio.com`, or bare org; normalized for API calls; session-only |
 | PAT | Full-width field; Basic auth `:${pat}` for ADO and runner apply; Show/Hide; session-only |
 | Fetch projects / processes | Optional inventory for update policy |
+| Multivalue extension | **Required.** Auto-checks DevLabs Multivalue control on the org; Check / Install controls. Missing or disabled blocks process / layout / project |
 | Execution mode | Simulate / API / Runner (see §7) |
 
 ### 2. Process & project names
@@ -261,6 +265,7 @@ Matches ADO Toolkit WIT migration:
 
 - HTML cells → passed through unchanged
 - Markdown-like cells → left as authored
+- Empty Description → field omitted on create (no synthetic “Imported from … row N” text)
 - On work-item create, runner also sends:
 
 ```text
@@ -320,7 +325,8 @@ Catalog Import is **one step for all catalog content** in the configured folder�
 | **Sources** | Every `.xlsx` matching name hints (Business Process Catalog, Deliverables, Objectives, Delivery Plan, SbD); template/guideline names excluded |
 | **Hierarchy** | Parent/child links follow **Title 1..N** columns (same model as [ADO CSV / BPC import guidance](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops)). Title 1 = root; Title 2 child of prior Title 1; etc. |
 | **Keys** | Process sequence ID / Microsoft ID are stored on the work item and used as external keys for linking lookups; they do **not** derive the parent outline |
-| **Prevalidate** | Before create (and on dry-run): normalize multi-select tokens; strip `Area Path` = `Not found`, Test Case `State` = `New`, invalid single picklist values; apply Fields-sheet **Default value** when a required applicable field is empty; report remaining required-empty / unknown multi-select tokens → `import-prevalidate.json` |
+| **Prevalidate** | Before create (and on dry-run): normalize multi-select tokens; **case-insensitive** picklist align to template casing; strip `Area Path` = `Not found`, Test Case `State` = `New`, invalid single picklist values (no match); apply Fields-sheet **Default value** when a required applicable field is empty; report remaining required-empty / unknown multi-select tokens → `import-prevalidate.json` |
+| **Description** | Spreadsheet Description mapped to `System.Description` only when non-empty; empty → field omitted (no synthetic “Imported from … row N”) |
 | **Create-only** | Successful creates are not updated on re-run. Rebuild hierarchy on a clean project (or delete prior imports) after fixing process/layout |
 | **Log stats** | `linked` / `missing parent` counts; warnings when a Title-outline parent key has no ADO id yet (usually parent create failed earlier) |
 | **Smoke tests** | API `catalog_limit` or apply dry-run to avoid a full ~15k-row live import |
@@ -455,19 +461,20 @@ Then poll `/jobs/{id}` from the response.
 
 ```text
 React UI (Vite)
-  ├─ /ado-proxy  → Azure DevOps (browser reads)
-  ├─ /fs         → Local filesystem browser
-  └─ /api        → Local runner :8787
+  ├─ /ado-proxy       → Azure DevOps (browser reads)
+  ├─ /extmgmt-proxy   → Extension Management (Multivalue check/install)
+  ├─ /fs              → Local filesystem browser
+  └─ /api             → Local runner :8787
                       ├─ excel_ir.py         Excel → IR (keeps disabled WITs)
                       ├─ planner.py          IR → dry-run plan
                       ├─ richtext.py         HTML detect / optional MD→HTML
                       ├─ catalog_import.py   Drafts, Title 1..N parents, multiline flags
                       ├─ catalog_validate.py Prevalidate / sanitize before create
                       ├─ mapping.py          Catalog headers → field refs
-                      ├─ ado_client.py       REST client + retries
+                      ├─ ado_client.py       REST client + retries + Multivalue preflight
                       ├─ org_url.py          Org URL normalize/parse
                       ├─ fs_browser.py       Path picker backend
-                      ├─ apply_engine.py     Step orchestration
+                      ├─ apply_engine.py     Step orchestration (+ Multivalue gate)
                       └─ writers/*           process, layout, project, teams, backlog, catalog, report
 ```
 
@@ -475,9 +482,11 @@ Key design rules:
 
 - Browser never owns long write jobs; runner does
 - Process + layout before project (full/dependency runs)
+- **DevLabs Multivalue extension is required** on the org before process / layout / project
 - Excel is authoring; IR is the run source of truth
 - Catalog parents follow Title outline; sequence IDs are keys only
-- Multi-select uses July suggested-picklist + DevLabs control pattern
+- Multi-select uses July suggested-picklist + DevLabs Multivalue control pattern
+- Empty Description is omitted (not invented)
 - No subprocess calls to July scripts
 - Launcher replaces stale `:8787` and starts uvicorn with `--reload`
 
@@ -641,9 +650,13 @@ If many items are unlinked:
 
 Template fields with **Multi-select = Yes** are created as suggested picklists so values like `Business Central; Finance and Operations` can be stored (July / DevLabs multivalue model).
 
+**Required:** The [DevLabs Multivalue control](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) must be installed and enabled on the organization. Process / layout / project setup will not run without it.
+
+**Preflight:** Connection checks the extension when URL + PAT are set. Running process / layout / project prompts to install if missing. If you decline or the PAT cannot install org extensions, setup is blocked until the extension is available.
+
 **Fix sequence for an existing org:**
 
-1. Install [Multivalue control](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) on the organization (manual; not auto-installed)
+1. Use **Install Multivalue extension** in Connection (or install [Multivalue control](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) as an org admin)
 2. Re-run **Process Template** (updates `isSuggested` / `isPicklistSuggested`) then **Page Layout** (binds multivalue control)
 3. Re-run **Catalog Import** on a clean project
 
@@ -651,9 +664,9 @@ Catalog always runs **prevalidate** first (`import-prevalidate.json`):
 
 | Action | Examples |
 |--------|----------|
-| Strip (allow create) | `Area Path` = `Not found`; Test Case `State` = `New`; invalid **single** picklist values |
+| Strip (allow create) | `Area Path` = `Not found`; Test Case `State` = `New`; invalid **single** picklist values (no case-insensitive match) |
 | Apply template default | Required applicable field empty in spreadsheet but Fields sheet has **Default value** (e.g. Business process flow source → `Microsoft`, Catalog status → `10 - New`) |
-| Normalize | Multi-select semicolon tokens (trim / rejoin) |
+| Normalize | Multi-select semicolon tokens (trim / rejoin); picklist **casing** to template canonical (e.g. Module `Organization Administration` → `Organization administration`) |
 | Report only | Required empty with **no** template default (e.g. Migration Data type); unknown multi-select tokens; source column mismatches (e.g. Job purpose filled with Job type values) |
 
 Inspect `import-failures.json` for remaining ADO 400s after prevalidate.
@@ -662,7 +675,7 @@ Inspect `import-failures.json` for remaining ADO 400s after prevalidate.
 
 1. **Preview plan** — confirm catalog file/row counts  
 2. **Process** → **Layout** → **Project** → **Teams** → **Backlog** (Full or Dependency-aware)  
-3. Confirm DevLabs multivalue extension is installed  
+3. Confirm Connection shows **Multivalue: installed** (or accept the Run-time install prompt)  
 4. **Catalog Import** (Selected step only is fine once the project exists)  
 5. Review `import-prevalidate.json`, `ado-id-map.csv`, `import-failures.json`, and linked/missing-parent log lines  
 
@@ -676,8 +689,8 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 
 ## 16. Security notes
 
-- PAT is kept in **sessionStorage** only (not in saved profiles)
-- Prefer least-privilege PATs and rotate after bulk imports
+- PAT is kept in **sessionStorage** only (not persisted to disk)
+- Prefer least-privilege PATs and rotate after bulk imports; extension install needs org extension-management rights
 - Runner binds to `127.0.0.1` by default (local only)
 - Do not commit `.venv/`, `runner-out/`, or files containing PATs
 
@@ -686,7 +699,7 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 ## 17. Known limitations
 
 - Apply writers follow the July-shaped workbook closely, but are not a line-for-line port of every July edge case
-- DevLabs **Multivalue** control is bound on layout for Multi-select fields; **installing the marketplace extension on the org is still manual**
+- **DevLabs Multivalue extension is required** for process / layout / project (Connection preflight + optional API install; Marketplace/admin if the PAT cannot install). Layout binds the Multivalue form control for Multi-select fields
 - Disabling inherited system WITs via the public Process API can fail; manual disable in the ADO UI may still be required
 - `System.State` allowed values are owned by ADO process WIT models — not authored in the template Picklists sheet
 - Some Deliverables source columns (e.g. Job purpose / Job type / Data type) may not align with template picklists; prevalidate strips or reports but does not rewrite Microsoft source data
@@ -695,6 +708,7 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - Job store is in-memory; restarting the runner clears job history
 - Cancel in the UI stops client polling; it does not always hard-kill an in-flight apply thread
 - Some inherited layout surfaces can reject control updates; check layout warnings in the event log
+- Re-running Process may log `Field 'MSBPC.*' warning: ADO 404` when org-scoped fields already exist (Update API is lock/undelete only); fields remain usable — Layout binds them to WITs
 - **Simulate** / **API** modes remain for orchestration stubs and ADO reads; live apply is **Runner** only. UI fields `threads`, `maxRetries`, `layoutSheet`, and `backlogSheet` apply to Simulate/API, not runner jobs.
 
 ---
@@ -707,6 +721,7 @@ Double-click: Start BPCTool.command  (macOS)
 
 In the browser:
   1. Connection → Ready (Runner mode); org URL + PAT are session-only
+     Confirm Multivalue: installed (required for process/layout/project)
   2. Process + project names (+ optional description)
   3. Workflow: Selected step only / Dependency-aware / Full
   4. Load runner defaults → Preview plan (check catalog files/rows)
@@ -723,5 +738,6 @@ Defaults:
 - Catalog folder: `/Users/bill/BPC Files` (BPC + Deliverables + Objectives + SbD; override to your path)
 - Root area path: project name
 - Markdown: preserved unless “Convert Markdown…to HTML” is checked
+- Empty Description: omitted (no synthetic import placeholder)
 - Run mode: Selected step only
-- Catalog parents: Title 1..N outline; Multi-select: suggested picklists + DevLabs control
+- Catalog parents: Title 1..N outline; Multi-select: suggested picklists + **required** DevLabs Multivalue extension

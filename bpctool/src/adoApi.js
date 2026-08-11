@@ -32,6 +32,31 @@ export function buildAdoApiBase(orgUrl) {
   return `/ado-proxy/${encodeURIComponent(parsed.org)}`
 }
 
+/** Extension Management host (installedextensions* APIs). */
+export function buildExtmgmtApiBase(orgUrl) {
+  const parsed = parseAdoOrgUrl(orgUrl)
+  if (!parsed.ok) {
+    throw new Error(parsed.error)
+  }
+
+  return `/extmgmt-proxy/${encodeURIComponent(parsed.org)}`
+}
+
+/** Microsoft DevLabs Multivalue control — required for Multi-select layout. */
+export const DEVLABS_MULTIVALUE = {
+  publisherName: 'ms-devlabs',
+  extensionName: 'vsts-extensions-multivalue-control',
+  itemName: 'ms-devlabs.vsts-extensions-multivalue-control',
+  displayName: 'Multivalue control (Microsoft DevLabs)',
+  marketplaceUrl:
+    'https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control',
+}
+
+export function stepsRequireMultivalueExtension(stepIds = []) {
+  const need = new Set(['process', 'layout', 'project'])
+  return stepIds.some((id) => need.has(id))
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -70,9 +95,10 @@ async function parseErrorMessage(response) {
 
 /**
  * fetch with Basic PAT auth and 429/503 Retry-After backoff.
+ * @param {string} apiBase - `/ado-proxy/{org}` or `/extmgmt-proxy/{org}`
  */
-export async function adoFetch(
-  orgUrl,
+async function adoServiceFetch(
+  apiBase,
   path,
   {
     pat,
@@ -87,10 +113,9 @@ export async function adoFetch(
     throw new Error('PAT is required for Azure DevOps API calls.')
   }
 
-  const base = buildAdoApiBase(orgUrl)
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   const separator = normalizedPath.includes('?') ? '&' : '?'
-  const url = `${base}${normalizedPath}${separator}api-version=${apiVersion}`
+  const url = `${apiBase}${normalizedPath}${separator}api-version=${apiVersion}`
 
   let lastError = null
 
@@ -158,6 +183,55 @@ export async function adoFetch(
   }
 
   throw lastError || new Error('Azure DevOps request failed')
+}
+
+export async function adoFetch(orgUrl, path, options = {}) {
+  return adoServiceFetch(buildAdoApiBase(orgUrl), path, options)
+}
+
+export async function extmgmtFetch(orgUrl, path, options = {}) {
+  return adoServiceFetch(buildExtmgmtApiBase(orgUrl), path, options)
+}
+
+/**
+ * @returns {Promise<{ status: 'installed'|'missing'|'disabled', extension?: object }>}
+ */
+export async function getMultivalueExtensionStatus(orgUrl, pat, { signal } = {}) {
+  const path =
+    `/_apis/extensionmanagement/installedextensionsbyname/` +
+    `${encodeURIComponent(DEVLABS_MULTIVALUE.publisherName)}/` +
+    `${encodeURIComponent(DEVLABS_MULTIVALUE.extensionName)}`
+  try {
+    const data = await extmgmtFetch(orgUrl, path, {
+      pat,
+      signal,
+      apiVersion: '7.1-preview.1',
+    })
+    const flags = String(data?.installState?.flags ?? 'none').toLowerCase()
+    if (flags.includes('disabled')) {
+      return { status: 'disabled', extension: data }
+    }
+    return { status: 'installed', extension: data }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/^ADO 404\b/.test(message)) {
+      return { status: 'missing' }
+    }
+    throw error
+  }
+}
+
+export async function installMultivalueExtension(orgUrl, pat, { signal } = {}) {
+  const path =
+    `/_apis/extensionmanagement/installedextensionsbyname/` +
+    `${encodeURIComponent(DEVLABS_MULTIVALUE.publisherName)}/` +
+    `${encodeURIComponent(DEVLABS_MULTIVALUE.extensionName)}`
+  return extmgmtFetch(orgUrl, path, {
+    pat,
+    method: 'POST',
+    signal,
+    apiVersion: '7.1-preview.1',
+  })
 }
 
 export async function fetchProjects(orgUrl, pat, { signal, apiVersion = '7.1' } = {}) {

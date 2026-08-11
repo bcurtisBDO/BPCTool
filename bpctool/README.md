@@ -44,20 +44,23 @@ Advanced: `npm run runner` still starts only the API if you need it alone. Prefe
 
 ## First-run checklist (in the browser)
 
-1. **Connection** — org URL + PAT (session-only) → Ready (PAT field spans the full content width)
-2. **Execution mode** → **Runner** (default)
-3. **Process & project names** — enter names; optional **project description**; set update policy
-4. **Workflow selection** — default **Selected step only**, or Dependency-aware / Full
-5. **Run configuration** — set **Template workbook path** (your ADO guideline `.xlsx`) and **Catalog source folder**; **Load runner defaults** fills catalog (and template if found beside it / via `BPCTOOL_TEMPLATE`)
-6. **Preview plan (dry-run)** — review steps/counts (never mutates ADO)
-7. Confirm **Apply dry-run** is unchecked → **Run selected flow** for live apply
-8. Optional: check **Apply dry-run** only to rehearse without org changes
+1. **Connection** — org URL + PAT (session-only) → Ready
+2. Confirm **Multivalue: installed** (DevLabs Multivalue control is **required** for process / layout / project). Use **Check** / **Install**, or accept the Run-time install prompt. Marketplace: [Multivalue control](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control)
+3. **Execution mode** → **Runner** (default)
+4. **Process & project names** — enter names; optional **project description**; set update policy
+5. **Workflow selection** — default **Selected step only**, or Dependency-aware / Full
+6. **Run configuration** — set **Template workbook path** (your ADO guideline `.xlsx`) and **Catalog source folder**; **Load runner defaults** fills catalog (and template if found beside it / via `BPCTOOL_TEMPLATE`)
+7. **Preview plan (dry-run)** — review steps/counts (never mutates ADO)
+8. Confirm **Apply dry-run** is unchecked → **Run selected flow** for live apply
+9. Optional: check **Apply dry-run** only to rehearse without org changes
 
 Defaults:
 
 - Template: **not bundled** — provide the July ADO template guideline path (Browse…); often kept next to catalog files
 - Catalog: `/Users/bill/BPC Files` (change to your path)
 - Root area path: project name (project root)
+
+**Requirement:** Microsoft DevLabs **Multivalue** extension on the target org (see step 2).
 
 Artifacts: `runner-out/<org>_<project>/`
 
@@ -95,14 +98,17 @@ Artifacts: `runner-out/<org>_<project>/`
 - **Disabled** WIT rows stay in IR so Process can disable them in ADO
 - Duplicate custom backlog levels left by older applies are healed on re-run (system Epics/Features preferred)
 - **Multi-select** fields (Application family, Products, Industries, …): suggested picklists + DevLabs multivalue form control so `A; B` values import
+- **DevLabs Multivalue extension is required** on the org for process / layout / project (Connection preflight + Run install prompt; Marketplace/admin if PAT cannot install)
 - **Catalog Import** loads every matching `.xlsx` in the catalog folder (not only Business Process Catalog); parent links follow **Title 1..N** (ADO CSV outline), not Process sequence ID
-- Catalog **prevalidate** strips common hard-fail values and writes `import-prevalidate.json` before create
+- Catalog **prevalidate**: strip hard-fail values, apply Fields-sheet defaults, **case-insensitive** picklist align → `import-prevalidate.json`
+- Empty spreadsheet **Description** → no `System.Description` on create (no “Imported from … row N” text)
 - Org URL accepts `dev.azure.com/{org}`, `{org}.visualstudio.com`, or bare org name
 
 ## Rich text
 
 - **HTML** from Excel → always preserved  
 - **Markdown** → preserved by default (+ `multilineFieldsFormat=Markdown` on create)  
+- Empty Description → omitted (not invented)  
 - Optional UI: **Convert Markdown large-text fields to HTML**  
 
 Details: [USER_GUIDE.md §8](./USER_GUIDE.md#8-rich-text-html-vs-markdown).
@@ -114,7 +120,7 @@ Catalog is **create-only** (no in-place upsert). Typical outputs under `runner-o
 | File | Role |
 |------|------|
 | `import-preview.csv` | Sample drafts (also on apply dry-run) |
-| `import-prevalidate.json` | Picklist / area / state preflight counts |
+| `import-prevalidate.json` | Preflight counts (incl. `picklist_case_normalized`, defaults, strips) |
 | `ado-id-map.csv` | Created ids + `ParentKey` / `ParentId` |
 | `import-failures.json` | Per-row ADO create errors |
 

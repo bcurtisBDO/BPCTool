@@ -74,13 +74,26 @@ def prevalidate_catalog_drafts(
     token-by-token against the template Picklists sheet. With process
     ``isSuggested``/``isPicklistSuggested``, semicolon composites can be stored;
     prevalidate still flags unknown tokens for data quality.
+
+    Single- and multi-select picklist membership is **case-insensitive**; when a
+    value matches ignoring case, sanitize rewrites it to the Picklists-sheet
+    canonical casing (e.g. ``Organization Administration`` →
+    ``Organization administration``).
     """
     result = PrevalidateResult()
     picklists = ir.get("process", {}).get("picklists") or {}
-    allowed_by_label = {
-        normalize(name): {str(v).strip() for v in values if str(v).strip()}
-        for name, values in picklists.items()
-    }
+    # label → {lowercase value → canonical template casing}
+    # Catalog workbooks often differ only by title-case vs sentence-case.
+    allowed_by_label: dict[str, dict[str, str]] = {}
+    for name, values in picklists.items():
+        canon: dict[str, str] = {}
+        for raw in values:
+            text = str(raw).strip()
+            if not text:
+                continue
+            # Prefer first-seen casing from the Picklists sheet as canonical.
+            canon.setdefault(text.casefold(), text)
+        allowed_by_label[normalize(name)] = canon
     # Map field ref → (label key, multi_select, required, is_picklist)
     field_meta: dict[str, dict[str, Any]] = {}
     for fd in mapping.fields_by_ref.values():
@@ -154,11 +167,38 @@ def prevalidate_catalog_drafts(
             text = str(value).strip()
             if meta["multi_select"]:
                 parts = split_multi_select(text)
-                normalized = join_multi_select(parts)
-                if sanitize and normalized != text:
+                remapped: list[str] = []
+                unknown: list[str] = []
+                casing_fixed = False
+                for part in parts:
+                    canon = allowed.get(part.casefold())
+                    if canon is None:
+                        remapped.append(part)
+                        unknown.append(part)
+                    else:
+                        if canon != part:
+                            casing_fixed = True
+                        remapped.append(canon)
+                normalized = join_multi_select(remapped)
+                if sanitize and (normalized != text or casing_fixed):
                     draft.fields[ref] = normalized
                     result.multi_select_normalized += 1
-                unknown = [p for p in parts if p not in allowed]
+                    if casing_fixed:
+                        result.issues.append(
+                            PrevalidateIssue(
+                                key=draft.key,
+                                work_item_type=draft.work_item_type,
+                                field=ref,
+                                value=text,
+                                kind="picklist_case_normalized",
+                                action="normalize",
+                                detail=(
+                                    f"Aligned multi-select token casing to "
+                                    f"picklist '{meta['label']}'"
+                                ),
+                            )
+                        )
+                        result.bump("picklist_case_normalized")
                 if unknown:
                     result.issues.append(
                         PrevalidateIssue(
@@ -173,7 +213,8 @@ def prevalidate_catalog_drafts(
                     )
                     result.bump("invalid_multi_select_token")
             else:
-                if text not in allowed:
+                canon = allowed.get(text.casefold())
+                if canon is None:
                     result.issues.append(
                         PrevalidateIssue(
                             key=draft.key,
@@ -189,6 +230,23 @@ def prevalidate_catalog_drafts(
                     if sanitize:
                         del draft.fields[ref]
                         result.fields_stripped += 1
+                elif sanitize and canon != text:
+                    draft.fields[ref] = canon
+                    result.issues.append(
+                        PrevalidateIssue(
+                            key=draft.key,
+                            work_item_type=draft.work_item_type,
+                            field=ref,
+                            value=text,
+                            kind="picklist_case_normalized",
+                            action="normalize",
+                            detail=(
+                                f"Aligned casing to picklist '{meta['label']}': "
+                                f"'{text}' → '{canon}'"
+                            ),
+                        )
+                    )
+                    result.bump("picklist_case_normalized")
 
         # Required MSBPC fields empty — fill template Default value when present;
         # only when WIT matrix marks the field applicable.

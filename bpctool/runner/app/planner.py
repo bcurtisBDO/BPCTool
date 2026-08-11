@@ -208,7 +208,7 @@ def build_dry_run_plan(
                 "verify",
                 "extension",
                 "ms-devlabs.vsts-extensions-multivalue-control",
-                "Confirm DevLabs multivalue control extension (warn if unavailable)",
+                "Require DevLabs Multivalue control extension (install/confirm before layout)",
             )
         )
 

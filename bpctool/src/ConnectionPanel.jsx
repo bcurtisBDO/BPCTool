@@ -21,8 +21,25 @@ export default function ConnectionPanel({
   onFetchProcesses,
   executionMode,
   onExecutionModeChange,
+  extensionStatus = 'unknown',
+  extensionMessage = '',
+  extensionBusy = false,
+  onCheckExtension,
+  onInstallExtension,
   disabled = false,
 }) {
+  const extensionChip =
+    extensionStatus === 'installed'
+      ? { className: 'completed', label: 'Multivalue: installed' }
+      : extensionStatus === 'checking'
+        ? { className: 'running', label: 'Multivalue: checking…' }
+        : extensionStatus === 'missing'
+          ? { className: 'idle', label: 'Multivalue: missing' }
+          : extensionStatus === 'disabled'
+            ? { className: 'idle', label: 'Multivalue: disabled' }
+            : extensionStatus === 'error'
+              ? { className: 'idle', label: 'Multivalue: check failed' }
+              : { className: 'idle', label: 'Multivalue: not checked' }
   const [expandedWhileReady, setExpandedWhileReady] = useState(false)
   const open = !connectionReady || expandedWhileReady
 
@@ -114,6 +131,49 @@ export default function ConnectionPanel({
             </button>
           </div>
 
+          <div className="extension-preflight field-span-full">
+            <div className="extension-preflight-row">
+              <span className={`status-chip ${extensionChip.className}`}>
+                {extensionChip.label}
+              </span>
+              <button
+                type="button"
+                className="secondary-inline"
+                onClick={onCheckExtension}
+                disabled={
+                  disabled ||
+                  extensionBusy ||
+                  !connectionReady ||
+                  executionMode === 'simulate'
+                }
+              >
+                {extensionStatus === 'checking' ? 'Checking…' : 'Check Multivalue extension'}
+              </button>
+              {extensionStatus === 'missing' || extensionStatus === 'disabled' ? (
+                <button
+                  type="button"
+                  onClick={onInstallExtension}
+                  disabled={
+                    disabled ||
+                    extensionBusy ||
+                    !connectionReady ||
+                    executionMode === 'simulate'
+                  }
+                >
+                  {extensionBusy ? 'Installing…' : 'Install Multivalue extension'}
+                </button>
+              ) : null}
+            </div>
+            {extensionMessage ? (
+              <p className="extension-preflight-message">{extensionMessage}</p>
+            ) : (
+              <p className="field-hint">
+                DevLabs Multivalue control is required for process template and project
+                setup (Multi-select fields). Checked automatically when URL + PAT are set.
+              </p>
+            )}
+          </div>
+
           <label className="field-span-full">
             Execution mode
             <select
@@ -138,7 +198,8 @@ export default function ConnectionPanel({
         </div>
       ) : (
         <p className="collapsed-summary">
-          {orgUrl || 'No org URL'} · PAT {pat ? 'set' : 'missing'} · mode {executionMode}
+          {orgUrl || 'No org URL'} · PAT {pat ? 'set' : 'missing'} · mode{' '}
+          {executionMode} · {extensionChip.label}
         </p>
       )}
     </section>

@@ -149,13 +149,7 @@ def _row_to_draft(
         else:
             formats["System.Description"] = "markdown"
             markdown_format_fields.append("System.Description")
-    else:
-        fields["System.Description"] = (
-            f"Imported from {row.get('_source_file')} row {row.get('_source_row')}."
-        )
-        formats["System.Description"] = "generated"
-        if not convert_markdown_to_html:
-            markdown_format_fields.append("System.Description")
+    # No Description in the spreadsheet → omit System.Description (do not invent one).
 
     for header, value in row.items():
         if str(header).startswith("_") or value in (None, ""):

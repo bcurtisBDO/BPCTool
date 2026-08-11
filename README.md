@@ -15,7 +15,9 @@ cd bpctool
 
 Prerequisites: Node.js 20+, Python 3.11+.
 
-In the browser: set org URL + PAT → process/project names → template workbook path (user-provided ADO guideline `.xlsx`) + catalog folder → Preview plan → Run (Runner mode).
+In the browser: set org URL + PAT → confirm **Multivalue: installed** (or install when prompted) → process/project names → template workbook path (user-provided ADO guideline `.xlsx`) + catalog folder → Preview plan → Run (Runner mode).
+
+**Required org extension:** [Multivalue control (Microsoft DevLabs)](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) — needed for Multi-select fields and for process / layout / project setup. The Connection panel checks the org and can install via API when the PAT allows; otherwise install as an org admin.
 
 ## Docs
 

@@ -37,6 +37,14 @@ def _mapping() -> TemplateMapping:
             required="No",
         ),
         FieldDef(
+            label="Module",
+            reference_name="MSBPC.module",
+            field_type="PicklistString",
+            multi_select=False,
+            custom_field=True,
+            required="No",
+        ),
+        FieldDef(
             label="Data type",
             reference_name="MSBPC.datatype",
             field_type="PicklistString",
@@ -76,6 +84,7 @@ def _mapping() -> TemplateMapping:
         mapping.fields_by_ref[fd.reference_name.lower()] = fd
     mapping.applicable_fields_by_wit["migration"] = {"data type"}
     mapping.applicable_fields_by_wit["job"] = {"job purpose"}
+    mapping.applicable_fields_by_wit["scenario"] = {"module"}
     mapping.applicable_fields_by_wit["process"] = {
         "application family",
         "products",
@@ -98,6 +107,11 @@ def _ir() -> dict:
                 ],
                 "Products": ["Business Central", "Finance", "Field Service"],
                 "Job purpose": ["Integration", "Reporting"],
+                "Module": [
+                    "Organization administration",
+                    "General ledger",
+                    "Accounts payable",
+                ],
                 "Data type": ["Master data", "Setup data"],
                 "Business process flow source": ["Microsoft", "Partner", "Customer"],
                 "Catalog status": ["10 - New", "20 - Review"],
@@ -174,6 +188,26 @@ def test_prevalidate_strips_invalid_single_picklist() -> None:
     result = prevalidate_catalog_drafts(drafts, _ir(), _mapping(), sanitize=True)
     assert "MSBPC.jobpurpose" not in drafts[0].fields
     assert result.counts.get("invalid_picklist_value") == 1
+
+
+def test_prevalidate_normalizes_picklist_casing() -> None:
+    """Catalog title-case vs template sentence-case (Module)."""
+    drafts = [
+        WorkItemDraft(
+            key="99.20.100.650",
+            parent_key=None,
+            work_item_type="Scenario",
+            title="Org admin scenario",
+            fields={"MSBPC.module": "Organization Administration"},
+            source_file="bpc.xlsx",
+            source_row=650,
+        )
+    ]
+    result = prevalidate_catalog_drafts(drafts, _ir(), _mapping(), sanitize=True)
+    assert drafts[0].fields["MSBPC.module"] == "Organization administration"
+    assert result.counts.get("picklist_case_normalized") == 1
+    assert result.counts.get("invalid_picklist_value") is None
+    assert result.fields_stripped == 0
 
 
 def test_prevalidate_required_empty_when_applicable() -> None:

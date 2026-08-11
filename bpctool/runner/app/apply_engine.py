@@ -106,6 +106,28 @@ def run_apply(
     _emit({"type": "apply-started", "message": f"Starting {'dry-run apply' if dry_run else 'apply'}"})
 
     try:
+        # Live process/layout/project requires DevLabs Multivalue extension (UI also preflights).
+        setup_steps = {"process", "layout", "project"}
+        needs_multivalue = any(
+            step_id in setup_steps
+            and (planned.get(step_id) or {}).get("planned_action") != "skip"
+            for step_id in selected
+        )
+        if client is not None and needs_multivalue:
+            _emit(
+                {
+                    "type": "preflight",
+                    "message": "Checking DevLabs Multivalue control extension…",
+                }
+            )
+            client.require_multivalue_extension()
+            _emit(
+                {
+                    "type": "preflight",
+                    "message": "DevLabs Multivalue control extension is installed.",
+                }
+            )
+
         for step_id in selected:
             step = planned.get(step_id)
             if not step:

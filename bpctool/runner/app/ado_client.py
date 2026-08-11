@@ -99,6 +99,63 @@ class AdoClient:
     def post(self, path: str, json_body: Any = None, **kwargs: Any) -> Any:
         return self.request("POST", path, json_body=json_body, **kwargs)
 
+    # Microsoft DevLabs Multivalue control (Multi-select layout contribution).
+    MULTIVALUE_PUBLISHER = "ms-devlabs"
+    MULTIVALUE_EXTENSION = "vsts-extensions-multivalue-control"
+
+    def extmgmt_url(self, path: str, *, api_version: str = "7.1-preview.1") -> str:
+        clean = path if path.startswith("/") else f"/{path}"
+        sep = "&" if "?" in clean else "?"
+        return (
+            f"https://extmgmt.dev.azure.com/{quote(self.org, safe='')}"
+            f"{clean}{sep}{urlencode({'api-version': api_version})}"
+        )
+
+    def get_multivalue_extension_status(self) -> str:
+        """Return installed | missing | disabled."""
+        path = (
+            "/_apis/extensionmanagement/installedextensionsbyname/"
+            f"{quote(self.MULTIVALUE_PUBLISHER, safe='')}/"
+            f"{quote(self.MULTIVALUE_EXTENSION, safe='')}"
+        )
+        try:
+            data = self.get(path, absolute_url=self.extmgmt_url(path)) or {}
+        except AdoError as exc:
+            if exc.status == 404:
+                return "missing"
+            raise
+        flags = str((data.get("installState") or {}).get("flags") or "none").lower()
+        if "disabled" in flags:
+            return "disabled"
+        return "installed"
+
+    def install_multivalue_extension(self) -> dict[str, Any]:
+        path = (
+            "/_apis/extensionmanagement/installedextensionsbyname/"
+            f"{quote(self.MULTIVALUE_PUBLISHER, safe='')}/"
+            f"{quote(self.MULTIVALUE_EXTENSION, safe='')}"
+        )
+        return self.post(path, absolute_url=self.extmgmt_url(path)) or {}
+
+    def require_multivalue_extension(self) -> None:
+        status = self.get_multivalue_extension_status()
+        if status == "installed":
+            return
+        if status == "disabled":
+            raise AdoError(
+                "DevLabs Multivalue control extension is installed but disabled. "
+                "Enable it under Organization settings → Extensions before "
+                "process template and project setup.",
+                status=403,
+            )
+        raise AdoError(
+            "DevLabs Multivalue control extension "
+            f"({self.MULTIVALUE_PUBLISHER}.{self.MULTIVALUE_EXTENSION}) is not "
+            "installed. It is required for process template and project setup. "
+            "Install from the Marketplace or approve install in the UI, then retry.",
+            status=404,
+        )
+
     def patch(self, path: str, json_body: Any = None, **kwargs: Any) -> Any:
         return self.request("PATCH", path, json_body=json_body, **kwargs)
 

@@ -9,6 +9,13 @@ const adoProxy = {
     secure: true,
     rewrite: (path) => path.replace(/^\/ado-proxy/, ''),
   },
+  // Extension Management API (DevLabs Multivalue install/check)
+  '/extmgmt-proxy': {
+    target: 'https://extmgmt.dev.azure.com',
+    changeOrigin: true,
+    secure: true,
+    rewrite: (path) => path.replace(/^\/extmgmt-proxy/, ''),
+  },
   '/api': {
     target: 'http://127.0.0.1:8787',
     changeOrigin: true,

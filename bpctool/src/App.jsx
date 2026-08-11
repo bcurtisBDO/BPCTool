@@ -1,6 +1,13 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { fetchProcesses, fetchProjects } from './adoApi'
+import {
+  DEVLABS_MULTIVALUE,
+  fetchProcesses,
+  fetchProjects,
+  getMultivalueExtensionStatus,
+  installMultivalueExtension,
+  stepsRequireMultivalueExtension,
+} from './adoApi'
 import { normalizeAdoOrgUrl } from './adoOrgUrl'
 import CollapsibleSection from './CollapsibleSection'
 import ConnectionPanel from './ConnectionPanel'
@@ -206,6 +213,9 @@ function App() {
   const [apiStatusText, setApiStatusText] = useState(
     'Fetch projects to validate the PAT against Azure DevOps.',
   )
+  const [extensionStatus, setExtensionStatus] = useState('unknown')
+  const [extensionMessage, setExtensionMessage] = useState('')
+  const [extensionBusy, setExtensionBusy] = useState(false)
 
   const isRunningRef = useRef(false)
   const abortControllerRef = useRef(null)
@@ -308,6 +318,63 @@ function App() {
   }, [orgUrl])
 
   const connectionReady = Boolean(effectiveOrgUrl && pat.trim())
+
+  useEffect(() => {
+    if (!connectionReady || executionMode === 'simulate') {
+      setExtensionStatus('unknown')
+      setExtensionMessage(
+        executionMode === 'simulate'
+          ? 'Simulate mode skips Azure DevOps extension checks.'
+          : '',
+      )
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      setExtensionBusy(true)
+      setExtensionStatus('checking')
+      try {
+        const result = await getMultivalueExtensionStatus(
+          effectiveOrgUrl,
+          pat.trim(),
+        )
+        if (cancelled) {
+          return
+        }
+        setExtensionStatus(result.status)
+        if (result.status === 'installed') {
+          setExtensionMessage(
+            `${DEVLABS_MULTIVALUE.displayName} is installed and enabled.`,
+          )
+        } else if (result.status === 'disabled') {
+          setExtensionMessage(
+            `${DEVLABS_MULTIVALUE.displayName} is installed but disabled. Enable it before process/project setup.`,
+          )
+        } else {
+          setExtensionMessage(
+            `${DEVLABS_MULTIVALUE.displayName} is not installed. Required for process template and project setup.`,
+          )
+        }
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        const message =
+          error instanceof Error ? error.message : 'Extension check failed'
+        setExtensionStatus('error')
+        setExtensionMessage(`Could not verify Multivalue extension: ${message}`)
+      } finally {
+        if (!cancelled) {
+          setExtensionBusy(false)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [connectionReady, effectiveOrgUrl, pat, executionMode])
 
   const cacheKey = useMemo(
     () => buildCacheKey(effectiveOrgUrl, processName, projectName),
@@ -431,6 +498,151 @@ function App() {
       `[${timestamp}] ${message}`,
       ...previousLogs,
     ].slice(0, 120))
+  }
+
+  const refreshMultivalueExtension = async () => {
+    if (!connectionReady || executionMode === 'simulate') {
+      setExtensionStatus('unknown')
+      setExtensionMessage(
+        executionMode === 'simulate'
+          ? 'Simulate mode skips Azure DevOps extension checks.'
+          : '',
+      )
+      return 'unknown'
+    }
+
+    setExtensionBusy(true)
+    setExtensionStatus('checking')
+    setExtensionMessage('Checking DevLabs Multivalue control on the organization…')
+    try {
+      const result = await getMultivalueExtensionStatus(
+        effectiveOrgUrl,
+        pat.trim(),
+      )
+      setExtensionStatus(result.status)
+      if (result.status === 'installed') {
+        setExtensionMessage(
+          `${DEVLABS_MULTIVALUE.displayName} is installed and enabled.`,
+        )
+      } else if (result.status === 'disabled') {
+        setExtensionMessage(
+          `${DEVLABS_MULTIVALUE.displayName} is installed but disabled. Enable it in Organization settings → Extensions before process/project setup.`,
+        )
+      } else {
+        setExtensionMessage(
+          `${DEVLABS_MULTIVALUE.displayName} is not installed. It is required for process template and project setup (Multi-select fields).`,
+        )
+      }
+      return result.status
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Extension check failed'
+      setExtensionStatus('error')
+      setExtensionMessage(`Could not verify Multivalue extension: ${message}`)
+      return 'error'
+    } finally {
+      setExtensionBusy(false)
+    }
+  }
+
+  const handleInstallMultivalueExtension = async ({ prompted = false } = {}) => {
+    if (!connectionReady) {
+      return false
+    }
+    setExtensionBusy(true)
+    setExtensionMessage('Installing DevLabs Multivalue control…')
+    try {
+      await installMultivalueExtension(effectiveOrgUrl, pat.trim())
+      setExtensionStatus('installed')
+      setExtensionMessage(
+        `${DEVLABS_MULTIVALUE.displayName} installed successfully.`,
+      )
+      addLog('Installed DevLabs Multivalue control extension on organization.')
+      return true
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Install failed'
+      setExtensionStatus('missing')
+      setExtensionMessage(
+        `Unable to install Multivalue extension: ${message}. Install manually from ${DEVLABS_MULTIVALUE.marketplaceUrl} (org owner / Extension Management permission required), then re-check.`,
+      )
+      if (prompted) {
+        window.alert(
+          `Unable to install the DevLabs Multivalue control extension.\n\n${message}\n\nThis extension is required for process template and project setup. Install it from the Marketplace (org admin), then try again:\n${DEVLABS_MULTIVALUE.marketplaceUrl}`,
+        )
+      }
+      return false
+    } finally {
+      setExtensionBusy(false)
+    }
+  }
+
+  /**
+   * Gate process / layout / project runs on Multivalue extension presence.
+   * Prompts to install when missing; blocks if declined or install fails.
+   */
+  const ensureMultivalueExtensionForSetup = async () => {
+    if (executionMode === 'simulate') {
+      return true
+    }
+    if (!stepsRequireMultivalueExtension(plannedStepIds)) {
+      return true
+    }
+
+    let status = extensionStatus
+    if (
+      status === 'unknown' ||
+      status === 'error' ||
+      status === 'checking'
+    ) {
+      status = await refreshMultivalueExtension()
+    }
+
+    if (status === 'installed') {
+      return true
+    }
+
+    if (status === 'disabled') {
+      window.alert(
+        `${DEVLABS_MULTIVALUE.displayName} is installed but disabled on this organization.\n\nEnable it under Organization settings → Extensions before process template and project setup can proceed.`,
+      )
+      setRunMessage(
+        'Blocked: DevLabs Multivalue extension is disabled on the organization.',
+      )
+      return false
+    }
+
+    if (status === 'error') {
+      window.alert(
+        `Could not verify the DevLabs Multivalue control extension.\n\n${extensionMessage || 'Check failed.'}\n\nProcess template and project setup require this extension. Fix PAT/permissions and re-check, or install from:\n${DEVLABS_MULTIVALUE.marketplaceUrl}`,
+      )
+      setRunMessage('Blocked: could not verify DevLabs Multivalue extension.')
+      return false
+    }
+
+    const wantInstall = window.confirm(
+      `${DEVLABS_MULTIVALUE.displayName} is not installed on this Azure DevOps organization.\n\n` +
+        `It is required for process template and project setup (Multi-select fields such as Application family / Products).\n\n` +
+        `Install it now with the current PAT?`,
+    )
+    if (!wantInstall) {
+      window.alert(
+        `Cannot proceed with process template and project setup without the DevLabs Multivalue control extension.\n\n` +
+          `Install it from the Marketplace and re-check, then run again:\n${DEVLABS_MULTIVALUE.marketplaceUrl}`,
+      )
+      setRunMessage(
+        'Blocked: DevLabs Multivalue extension is required for process/project setup.',
+      )
+      return false
+    }
+
+    const installed = await handleInstallMultivalueExtension({ prompted: true })
+    if (!installed) {
+      setRunMessage(
+        'Blocked: could not install DevLabs Multivalue extension (required for process/project setup).',
+      )
+    }
+    return installed
   }
 
   const logRunTiming = (timings, totalMs, { failed = false } = {}) => {
@@ -630,6 +842,11 @@ function App() {
 
     if (!nameValidation.ok) {
       setRunMessage(`Name/policy validation failed: ${nameValidation.messages.join(' ')}`)
+      return
+    }
+
+    const extensionOk = await ensureMultivalueExtensionForSetup()
+    if (!extensionOk) {
       return
     }
 
@@ -962,6 +1179,11 @@ function App() {
         onFetchProcesses={handleFetchProcesses}
         executionMode={executionMode}
         onExecutionModeChange={setExecutionMode}
+        extensionStatus={extensionStatus}
+        extensionMessage={extensionMessage}
+        extensionBusy={extensionBusy}
+        onCheckExtension={refreshMultivalueExtension}
+        onInstallExtension={() => handleInstallMultivalueExtension({ prompted: false })}
         disabled={isRunning}
       />
 
