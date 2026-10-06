@@ -649,9 +649,11 @@ Use the current quarter's **ADO template guideline** workbook, not a catalog fil
 
 ### Update confirmation required
 
-**Symptom:** Preview plan blocked because process/project exists.
+**Symptom:** **Preview plan** and **Run** are disabled with “already exists. Confirm update…” under section 2, or the plan reports **Plan blocked** with the same message.
 
-**Fix:** Check confirm boxes, or switch policy to **Always update** / **Skip existing**.
+**Why:** Preview plan does not call Azure DevOps itself. It uses the inventory you loaded with **Fetch existing projects / processes** (section 1). If a typed name matches that inventory and the policy is **Require confirmation** (or **Create only**), the runner rejects the plan. Rehearsal and live runs apply the same check.
+
+**Fix:** Tick the confirm-update box(es), or switch the policy to **Always update** / **Skip existing**.
 
 ### PAT / 401 / 403 on live apply
 
