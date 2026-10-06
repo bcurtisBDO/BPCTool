@@ -193,3 +193,9 @@ Auto-started on `127.0.0.1:8787`, proxied as `/api/*` from Vite:
 - `POST /jobs`, `GET /jobs/{id}?since=N`, `POST /jobs/{id}/cancel`
 
 Full request fields (including `project_description`) and curl examples: [USER_GUIDE.md §12](./USER_GUIDE.md#12-local-runner-api).
+
+---
+
+## License
+
+[CC0 1.0 Universal](../LICENSE) — dedicated to the public domain.

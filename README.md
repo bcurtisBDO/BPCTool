@@ -47,3 +47,7 @@ bpctool/
 ```
 
 Template and catalog workbooks are **not** bundled — supply absolute paths (or set `BPCTOOL_TEMPLATE` / place the guideline beside the catalog folder).
+
+## License
+
+[CC0 1.0 Universal](./LICENSE) — dedicated to the public domain.
