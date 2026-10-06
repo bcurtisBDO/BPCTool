@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pytest
 
-_TEMPLATE_CANDIDATES = (
-    "ADO template guideline (July).xlsx",
-    "ADO template guideline.xlsx",
-)
+from app.excel_ir import find_template_workbook
+from app.paths import bpc_files_root, resolve_release_folder
 
 
 def resolve_template_path() -> Path | None:
@@ -19,13 +17,8 @@ def resolve_template_path() -> Path | None:
         path = Path(env).expanduser()
         return path if path.is_file() else None
 
-    catalog = Path(os.environ.get("BPCTOOL_CATALOG", "/Users/bill/BPC Files")).expanduser()
-    if catalog.is_dir():
-        for name in _TEMPLATE_CANDIDATES:
-            candidate = catalog / name
-            if candidate.is_file():
-                return candidate
-    return None
+    release = resolve_release_folder(bpc_files_root())
+    return find_template_workbook(release) if release else None
 
 
 @pytest.fixture

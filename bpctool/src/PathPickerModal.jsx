@@ -179,8 +179,8 @@ export default function PathPickerModal({
             onChange={(event) => setDraft(event.target.value)}
             placeholder={
               mode === 'folder'
-                ? '/Users/you/BPC Files'
-                : '/Users/you/.../ADO template guideline (July).xlsx'
+                ? '/Users/you/BPC Files/2026-Q4'
+                : '/Users/you/.../ADO template guideline.xlsx'
             }
             autoFocus
           />

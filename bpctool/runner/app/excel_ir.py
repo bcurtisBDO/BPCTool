@@ -1,4 +1,4 @@
-"""Parse July ADO template workbook (+ optional catalog sources) into IR."""
+"""Parse the quarterly ADO template guideline workbook (+ optional catalog sources) into IR."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-IR_VERSION = "2026.08-july-1"
+IR_VERSION = "2026.10-1"
+
+# Release suffixes vary each quarter, e.g. "ADO template guideline (<Month>).xlsx".
+TEMPLATE_FILE_GLOB = "ADO template guideline*.xlsx"
 
 REQUIRED_TEMPLATE_SHEETS = [
     "Work item types",
@@ -30,7 +33,7 @@ CATALOG_FILE_HINTS = (
 )
 
 # Template / guideline workbooks must never be treated as catalog sources even if
-# their names contain "July" / "jul".
+# their names carry the same quarterly release suffix as the catalog files.
 CATALOG_EXCLUDE_HINTS = (
     "ado template",
     "template guideline",
@@ -110,11 +113,15 @@ def parse_work_item_types(path: Path) -> list[dict[str, Any]]:
         if not name:
             continue
         custom = _get(row, headers, "Custom work item type").lower()
+        # X = field on the WIT and its form; H = field on the WIT, hidden from the form.
         applicable = []
+        hidden = []
         for index, label in field_cols:
             flag = _cell(row[index]).upper() if index < len(row) else ""
             if flag == "X":
                 applicable.append(label)
+            elif flag == "H":
+                hidden.append(label)
         items.append(
             {
                 "name": name,
@@ -128,6 +135,7 @@ def parse_work_item_types(path: Path) -> list[dict[str, Any]]:
                 "icon": _get(row, headers, "Icon") or "icon_gear",
                 "help_text": _get(row, headers, "Help text"),
                 "applicable_field_labels": applicable,
+                "hidden_field_labels": hidden,
             }
         )
     return items
@@ -208,7 +216,7 @@ def parse_iteration_paths(path: Path) -> list[dict[str, str]]:
 
 
 def parse_area_paths(path: Path) -> list[dict[str, Any]]:
-    """Parse Area paths sheet using July L1–L4 semantics.
+    """Parse Area paths sheet using L1–L4 semantics.
 
     Column A is the project-name placeholder (skipped). Columns B–E are
     L1–L4 hierarchy; column F is Teams.
@@ -222,7 +230,7 @@ def parse_area_paths(path: Path) -> list[dict[str, Any]]:
         if _cell(value).lower() == "teams":
             team_col = index
             break
-    # July uses B..E as L1..L4 (indexes 1..4) when the sheet has the standard layout.
+    # The template uses B..E as L1..L4 (indexes 1..4) when the sheet has the standard layout.
     if team_col is None:
         team_col = 5
     level_cols = list(range(1, team_col))[:4]
@@ -307,7 +315,8 @@ def _looks_like_catalog(path: Path) -> bool:
 def is_catalog_source_file(path: Path) -> bool:
     """True when an .xlsx in the catalog folder should be imported as catalog data.
 
-    Accepts names like ``Deliverables JUL 2026.xlsx`` (hint match). Rejects the
+    Accepts names with any release suffix, e.g. ``Deliverables <MMM YYYY>.xlsx``
+    (hint match). Rejects the
     ADO template guideline workbook even when it sits in the same folder.
     """
     name = path.name
@@ -317,6 +326,67 @@ def is_catalog_source_file(path: Path) -> bool:
     if any(hint in lowered for hint in CATALOG_EXCLUDE_HINTS):
         return False
     return _looks_like_catalog(path)
+
+
+_CATALOG_KINDS = (
+    ("business process catalog", "Business Process Catalog"),
+    ("deliverables", "Deliverables"),
+    ("objectives", "Objectives"),
+    ("delivery plan", "SbD Delivery Plan"),
+    ("sbd", "SbD Delivery Plan"),
+)
+
+
+def catalog_kind(path: Path) -> str:
+    lowered = path.name.lower()
+    for hint, kind in _CATALOG_KINDS:
+        if hint in lowered:
+            return kind
+    return "Other"
+
+
+def catalog_folder_warnings(catalog_dir: Path, files: list[dict[str, Any]]) -> list[str]:
+    """Layout problems that would import the wrong data (mixed or missing releases)."""
+    warnings: list[str] = []
+    by_kind: dict[str, list[str]] = {}
+    for item in files:
+        by_kind.setdefault(item["kind"], []).append(item["file_name"])
+    for kind, names in sorted(by_kind.items()):
+        if len(names) > 1:
+            warnings.append(
+                f"Catalog folder has {len(names)} {kind} workbooks ({', '.join(names)}). "
+                "All of them will be imported — keep one quarterly release per folder "
+                "to avoid duplicate work items."
+            )
+    if not files:
+        nested = sorted(
+            child.name
+            for child in catalog_dir.iterdir()
+            if child.is_dir()
+            and not child.name.startswith((".", "_"))
+            and any(is_catalog_source_file(p) for p in child.glob("*.xlsx"))
+        )
+        if nested:
+            warnings.append(
+                "Catalog folder has no catalog workbooks of its own but contains release "
+                f"subfolders ({', '.join(nested)}). Point Catalog source folder at one release "
+                "folder (Load runner defaults picks the newest)."
+            )
+    return warnings
+
+
+def find_template_workbook(folder: Path) -> Path | None:
+    """Most recently modified ``ADO template guideline*.xlsx`` in ``folder``."""
+    if not folder.is_dir():
+        return None
+    candidates = [
+        path
+        for path in folder.glob(TEMPLATE_FILE_GLOB)
+        if path.is_file() and not path.name.startswith("~$")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
 
 
 def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
@@ -343,7 +413,7 @@ def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
         if not rows:
             continue
 
-        # Prefer second header row when present (JUL files have dual header lines).
+        # Prefer second header row when present (catalog workbooks may have dual header lines).
         header_idx = 0
         if len(rows) > 1 and any(_cell(v).lower() == "work item type" for v in rows[1]):
             header_idx = 1
@@ -376,6 +446,7 @@ def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
             {
                 "file_name": path.name,
                 "path": str(path),
+                "kind": catalog_kind(path),
                 "sheet": sheet_name,
                 "row_count": row_count,
                 "sample_titles": sample_titles,
@@ -386,6 +457,7 @@ def parse_catalog_sources(catalog_dir: Path | None) -> dict[str, Any]:
         "files": files,
         "total_rows": total_rows,
         "work_item_types": dict(sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "warnings": catalog_folder_warnings(catalog_dir, files),
     }
 
 
@@ -413,7 +485,7 @@ def build_ir(
         raise FileNotFoundError(
             f'Excel template path must be absolute (got "{excel_file}"). '
             "Use Browse… in the UI (local runner path picker) or paste a full path "
-            "such as /Users/you/.../ADO template guideline (July).xlsx — "
+            "such as /Users/you/.../ADO template guideline.xlsx — "
             "browser dialogs alone often return only the folder/file name."
         )
     path = raw.resolve()
@@ -438,7 +510,7 @@ def build_ir(
     catalog = parse_catalog_sources(catalog_dir)
 
     # Keep disabled WITs in IR so process can disable them in ADO and backlog
-    # assignment can skip them (July Work item types sheet).
+    # assignment can skip them (Work item types sheet).
     work_item_types = parse_work_item_types(path)
     fields = parse_fields(path)
     picklists = parse_picklists(path)
@@ -481,6 +553,9 @@ def build_ir(
             "disabled_work_item_types": len(disabled_wits),
             "fields": len(fields),
             "html_fields": len(html_fields),
+            "hidden_field_placements": sum(
+                len(wit.get("hidden_field_labels") or []) for wit in enabled_wits
+            ),
             "picklists": len(picklists),
             "picklist_values": sum(len(values) for values in picklists.values()),
             "teams": len(teams),

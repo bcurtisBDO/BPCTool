@@ -1,11 +1,11 @@
 # Reference — process after apply
 
-Snapshots of an Azure DevOps process **after** BPCTool creates/updates it from the July template. Useful when comparing layout, states, and field applicability to Excel IR / writers.
+Snapshots of an Azure DevOps process **after** BPCTool creates/updates it from an ADO template guideline release. Useful when comparing layout, states, and field applicability to Excel IR / writers. Templates are refreshed quarterly, so a snapshot reflects the release it was generated from — counts may differ for later releases.
 
 **Note:** Process / layout / project setup requires the org to have the [DevLabs Multivalue control](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) installed and enabled (Multi-select field UI).
 
 | File | Source |
 |------|--------|
-| [MSBPC-Jul26-analysis.md](./MSBPC-Jul26-analysis.md) | Post-create analysis of process `MSBPCTemplate` (43 WITs: 40 enabled, 3 disabled). Generated 2026-08-09. |
+| [MSBPC-process-analysis.md](./MSBPC-process-analysis.md) | Post-create analysis of process `MSBPCTemplate` (43 WITs: 40 enabled, 3 disabled). Generated 2026-08-09. |
 
-Related: [Workflow & July comparison](../workflow-and-july-comparison.md) (X vs H matrix parity, Catalog parallel/resume/backfill, July vs BPCTool — assessment 2026-08-11).
+Related: [Workflow & reference-script comparison](../workflow-and-script-comparison.md) (quarterly releases, X vs H, Catalog parallel/resume/backfill, incremental re-runs & conflicts, reference scripts vs BPCTool — assessment 2026-10-06).

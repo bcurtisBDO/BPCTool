@@ -28,10 +28,14 @@ async function parsePayload(response) {
         : payload.detail
           ? JSON.stringify(payload.detail)
           : `Runner error (${response.status})`
-    throw new Error(detail)
+    const error = new Error(detail)
+    error.status = response.status
+    throw error
   }
   return payload
 }
+
+const MAX_POLL_FAILURES = 8
 
 export async function createRunnerJob(body, { signal } = {}) {
   const response = await fetch('/api/jobs', {
@@ -43,41 +47,81 @@ export async function createRunnerJob(body, { signal } = {}) {
   return parsePayload(response)
 }
 
-export async function getRunnerJob(jobId, { signal } = {}) {
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { signal })
+export async function getRunnerJob(jobId, { signal, since = 0 } = {}) {
+  const query = since > 0 ? `?since=${since}` : ''
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}${query}`, { signal })
   return parsePayload(response)
+}
+
+/** Ask the runner to stop the job at its next safe checkpoint. */
+export async function cancelRunnerJob(jobId) {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+  return parsePayload(response)
+}
+
+export const isActiveJobStatus = (status) => status === 'queued' || status === 'running'
+
+/**
+ * Poll an existing job until terminal status, fetching only new events.
+ * Returns the final job with `events` holding every event received.
+ */
+export async function pollRunnerJob(
+  jobId,
+  { signal, onEvent, pollMs = 750, initialJob = null } = {},
+) {
+  const events = []
+  let job = initialJob
+
+  const absorb = (next) => {
+    const offset = next.event_offset ?? 0
+    const fresh = (next.events || []).slice(Math.max(0, events.length - offset))
+    for (const event of fresh) {
+      events.push(event)
+      if (typeof onEvent === 'function') {
+        onEvent(event)
+      }
+    }
+  }
+
+  if (job) {
+    absorb(job)
+  } else {
+    job = await getRunnerJob(jobId, { signal })
+    absorb(job)
+  }
+
+  let failures = 0
+  while (isActiveJobStatus(job.status)) {
+    await sleep(pollMs * 2 ** Math.min(failures, 3), signal)
+    try {
+      const next = await getRunnerJob(jobId, { signal, since: events.length })
+      failures = 0
+      job = next
+      absorb(job)
+    } catch (error) {
+      // A long run shouldn't be abandoned over a brief network/runner blip.
+      failures += 1
+      if (signal?.aborted || error?.status === 404 || failures >= MAX_POLL_FAILURES) {
+        throw error
+      }
+    }
+  }
+
+  return { ...job, events }
 }
 
 /**
  * Create an apply/dry-run job and poll until terminal status.
- * Invokes onEvent for each new runner event.
+ * Invokes onEvent for each new runner event and onJobCreated with the job id.
  */
-export async function runRunnerJob(body, { signal, onEvent, pollMs = 750 } = {}) {
-  let job = await createRunnerJob(body, { signal })
-  let seenEvents = 0
-
-  const publish = (events = []) => {
-    if (typeof onEvent !== 'function') {
-      return
-    }
-    for (const event of events.slice(seenEvents)) {
-      onEvent(event)
-    }
-    seenEvents = events.length
+export async function runRunnerJob(body, { signal, onEvent, onJobCreated, pollMs = 750 } = {}) {
+  const job = await createRunnerJob(body, { signal })
+  if (typeof onJobCreated === 'function') {
+    onJobCreated(job.id)
   }
-
-  publish(job.events)
-
-  while (job.status === 'queued' || job.status === 'running') {
-    if (signal?.aborted) {
-      throw new Error('Run cancelled.')
-    }
-    await sleep(pollMs, signal)
-    job = await getRunnerJob(job.id, { signal })
-    publish(job.events)
-  }
-
-  return job
+  return pollRunnerJob(job.id, { signal, onEvent, pollMs, initialJob: job })
 }
 
 export function buildRunnerJobBody({

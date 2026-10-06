@@ -156,6 +156,12 @@ async function adoServiceFetch(
       }
 
       const contentType = response.headers.get('content-type') || ''
+      // ADO answers an invalid/expired PAT with 203 + an HTML sign-in page.
+      if (response.status === 203 || contentType.includes('text/html')) {
+        throw new Error(
+          'ADO 401 Azure DevOps returned a sign-in page — the PAT is invalid, expired, or lacks the required scopes.',
+        )
+      }
       if (contentType.includes('application/json')) {
         return response.json()
       }
@@ -207,7 +213,10 @@ export async function getMultivalueExtensionStatus(orgUrl, pat, { signal } = {})
       signal,
       apiVersion: '7.1-preview.1',
     })
-    const flags = String(data?.installState?.flags ?? 'none').toLowerCase()
+    if (!data || typeof data !== 'object' || !data.extensionId) {
+      throw new Error('Unexpected Multivalue extension response from Azure DevOps.')
+    }
+    const flags = String(data.installState?.flags ?? 'none').toLowerCase()
     if (flags.includes('disabled')) {
       return { status: 'disabled', extension: data }
     }

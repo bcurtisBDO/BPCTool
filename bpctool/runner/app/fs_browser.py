@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .paths import bpc_files_root, resolve_release_folder
+
 
 def _home() -> Path:
     return Path.home().expanduser().resolve()
@@ -16,9 +18,12 @@ def list_roots() -> list[dict[str, str]]:
     roots: list[dict[str, str]] = [
         {"label": "Home", "path": str(home)},
     ]
-    catalog = home / "BPC Files"
+    catalog = bpc_files_root()
     if catalog.is_dir():
-        roots.append({"label": "BPC Files", "path": str(catalog)})
+        roots.append({"label": "BPC Files", "path": str(catalog.resolve())})
+        release = resolve_release_folder(catalog)
+        if release and release != catalog:
+            roots.append({"label": f"Latest release ({release.name})", "path": str(release.resolve())})
     if os.name == "nt":
         for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
             drive = Path(f"{letter}:/")

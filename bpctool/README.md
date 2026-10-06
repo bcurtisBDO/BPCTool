@@ -6,15 +6,16 @@ Repo entry: [../README.md](../README.md).
 
 Excel remains the authoring format. The runner parses workbooks into an intermediate representation (IR), plans the run, and applies changes through Azure DevOps REST APIs.
 
-**This app does not spawn the Microsoft July Python scripts.**  
+**This app does not spawn the Microsoft reference Python scripts.**  
+**Not tied to one release** — the template, catalog workbooks, and scripts are refreshed quarterly; point BPCTool at the current quarter's files.  
 **The local runner starts automatically with the UI** — no second terminal.
 
 | Doc | Contents |
 |-----|----------|
 | **[USER_GUIDE.md](./USER_GUIDE.md)** | Requirements, install, step-by-step usage, modes, Excel sheets, API, troubleshooting |
 | **[CHANGELOG.md](./CHANGELOG.md)** | What changed in the standalone rebuild and later releases |
-| **[docs/workflow-and-july-comparison.md](./docs/workflow-and-july-comparison.md)** | Workflow steps, X vs H matrix, ADO APIs, catalog parallel/resume/backfill, July scripts vs BPCTool |
-| **[docs/reference/](./docs/reference/)** | Post-create process template analysis (e.g. MSBPC Jul 2026) |
+| **[docs/workflow-and-script-comparison.md](./docs/workflow-and-script-comparison.md)** | Workflow steps, quarterly releases, X vs H, catalog, incremental re-runs & conflicts, reference scripts vs BPCTool |
+| **[docs/reference/](./docs/reference/)** | Post-create process template analysis (MSBPC snapshot) |
 
 ---
 
@@ -61,9 +62,29 @@ Sample UI (local Runner mode). Paths and names in the shots are illustrative.
 
 ### Catalog workers and run actions
 
-![Threads control for Catalog Import parallel workers, dry-run, and Run buttons](./docs/images/ui-actions.png)
+Live run: the button reads **Run selected flow (live)** and a red note names the org, process and project that will be changed.
+
+![Catalog workers, Rehearsal only unchecked, Preview plan and Run selected flow (live) buttons with the live-target note](./docs/images/ui-actions.png)
+
+Rehearsal: with **Rehearsal only** ticked, the button reads **Rehearse selected flow** and an amber note confirms Azure DevOps will not be changed. See [Preview plan vs Rehearsal only vs live run](./USER_GUIDE.md#preview-plan-vs-rehearsal-only-vs-live-run).
+
+![Rehearsal only ticked, Rehearse selected flow button and the amber rehearsal note](./docs/images/ui-actions-rehearsal.png)
 
 ---
+
+## Folder layout
+
+Put each quarterly release in its own folder, template and catalog workbooks together:
+
+```text
+~/BPC Files/
+  2026-Q4/
+    ADO template guideline (…).xlsx
+    Business Process Catalog ….xlsx · Deliverables ….xlsx · Objectives ….xlsx · SbD Delivery Plan ….xlsx
+  2026-Q3/ …        _archive/ (ignored)
+```
+
+BPCTool pre-fills the newest release folder, its template, and the release name as Workbook version. Run outputs (including `ado-id-map.csv`, which prevents duplicate catalog items on later runs) go to `runner-out/<org>_<project>/` — keep that folder, or move it outside the app with `BPCTOOL_OUTPUT_DIR` in `bpctool.env` (copy `bpctool.env.example`). Details: [USER_GUIDE §2 Folder layout](./USER_GUIDE.md#folder-layout-recommended).
 
 ## First-run checklist (in the browser)
 
@@ -72,20 +93,23 @@ Sample UI (local Runner mode). Paths and names in the shots are illustrative.
 3. **Execution mode** → **Runner** (default)
 4. **Process & project names** — enter names; optional **project description**; set update policy
 5. **Workflow selection** — default **Selected step only**, or Dependency-aware / Full
-6. **Run configuration** — set **Template workbook path** (your ADO guideline `.xlsx`) and **Catalog source folder**; **Load runner defaults** fills catalog (and template if found beside it / via `BPCTOOL_TEMPLATE`)
-7. **Preview plan (dry-run)** — review steps/counts (never mutates ADO)
-8. Confirm **Apply dry-run** is unchecked → **Run selected flow** for live apply
-9. Optional: check **Apply dry-run** only to rehearse without org changes
+6. **Run configuration** — confirm the pre-filled **Template workbook path**, **Catalog source folder** (one release folder), and **Workbook version**; use **Browse…** or **Load runner defaults** to change them
+7. **Preview plan** — reads the workbooks and shows steps/counts/warnings (never contacts ADO)
+8. Optional: tick **Rehearsal only** → **Rehearse selected flow** runs every step and writes preview files, still without changing ADO
+9. Untick **Rehearsal only** → **Run selected flow (live)**. The red note under the buttons names the org, process, and project that will change
+
+Preview plan ignores the checkbox; the checkbox only switches the run button between rehearsal and live. Comparison table: [USER_GUIDE §5](./USER_GUIDE.md#preview-plan-vs-rehearsal-only-vs-live-run).
 
 Defaults:
 
-- Template: **not bundled** — provide the July ADO template guideline path (Browse…); often kept next to catalog files
-- Catalog: `/Users/bill/BPC Files` (change to your path)
+- Folder root: `~/BPC Files` (`BPCTOOL_CATALOG` to change); newest release subfolder is selected
+- Template: **not bundled** — newest `ADO template guideline*.xlsx` in the release folder (or Browse… / `BPCTOOL_TEMPLATE`)
+- Workbook version: release folder name (e.g. `2026-Q4`), else blank
 - Root area path: project name (project root)
 
 **Requirement:** Microsoft DevLabs **Multivalue** extension on the target org (see step 2).
 
-Artifacts: `runner-out/<org>_<project>/`
+Artifacts: `runner-out/<org>_<project>/` (or `BPCTOOL_OUTPUT_DIR`) — back it up; it is shared by every release and re-run.
 
 ---
 
@@ -124,7 +148,8 @@ Artifacts: `runner-out/<org>_<project>/`
 - **DevLabs Multivalue extension is required** on the org for process / layout / project (Connection preflight + Run install prompt; Marketplace/admin if PAT cannot install)
 - **Catalog Import** loads every matching `.xlsx` in the catalog folder (not only Business Process Catalog); parent links follow **Title 1..N** (ADO CSV outline), not Process sequence ID
 - Catalog **prevalidate**: strip hard-fail values, apply Fields-sheet defaults, **case-insensitive** picklist align → `import-prevalidate.json`
-- Catalog **parallel create** (UI Threads), **resume** via `ado-id-map.csv`, **parent-link backfill** → `backfill-links-report.csv`
+- Catalog **parallel create** (UI **Catalog workers**), **resume** via `ado-id-map.csv`, parallel **parent-link backfill** that skips links made at create → `backfill-links-report.csv`
+- Catalog **progress bar** with ETA; Runner **Cancel run** stops the job cooperatively; reloading the page **reattaches** to a running job
 - Empty spreadsheet **Description** → no `System.Description` on create (no “Imported from … row N” text)
 - Org URL accepts `dev.azure.com/{org}`, `{org}.visualstudio.com`, or bare org name
 
@@ -143,7 +168,7 @@ Catalog is **create-only for fields** (no in-place upsert). Re-runs **resume** f
 
 | File | Role |
 |------|------|
-| `import-preview.csv` | Sample drafts (also on apply dry-run) |
+| `import-preview.csv` | Sample drafts (also on Rehearsal only runs) |
 | `import-prevalidate.json` | Preflight counts (incl. `picklist_case_normalized`, defaults, strips) |
 | `ado-id-map.csv` | Created ids + resume map (`ParentKey` / `ParentId`) |
 | `backfill-links-report.csv` | Parent-link backfill statuses |
@@ -165,6 +190,6 @@ Auto-started on `127.0.0.1:8787`, proxied as `/api/*` from Vite:
 
 - `GET /health`, `GET /defaults`
 - `POST /plan/dry-run`, `POST /ir/parse`
-- `POST /jobs`, `GET /jobs/{id}`
+- `POST /jobs`, `GET /jobs/{id}?since=N`, `POST /jobs/{id}/cancel`
 
 Full request fields (including `project_description`) and curl examples: [USER_GUIDE.md §12](./USER_GUIDE.md#12-local-runner-api).

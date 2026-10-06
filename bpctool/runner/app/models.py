@@ -56,7 +56,7 @@ class DryRunRequest(BaseModel):
         le=16,
         description=(
             "Parent-aware parallel workers for Catalog Import "
-            "(July-style; UI Threads control). Use 1 for serial."
+            "(UI Catalog workers control). Use 1 for serial."
         ),
     )
 
@@ -90,6 +90,7 @@ class ApplyResult(BaseModel):
     step_results: dict[str, Any] = {}
     output_dir: str | None = None
     error: str | None = None
+    cancelled: bool = False
     events: list[dict[str, Any]] = []
     duration_ms: int | None = None
     timings: list[dict[str, Any]] = Field(
@@ -108,8 +109,9 @@ class JobCreateRequest(DryRunRequest):
 
 class JobStatusResponse(BaseModel):
     id: str
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     mode: str
+    cancel_requested: bool = False
     created_at: str
     updated_at: str
     started_at: str | None = None
@@ -118,4 +120,9 @@ class JobStatusResponse(BaseModel):
     result: DryRunResponse | None = None
     apply_result: ApplyResult | None = None
     error: str | None = None
-    events: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Events from index event_offset onward (all when since=0)",
+    )
+    event_offset: int = 0
+    event_total: int = 0

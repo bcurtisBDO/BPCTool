@@ -108,7 +108,10 @@ describe('adoApi helpers', () => {
         headers: {
           get: (name) => (name === 'content-type' ? 'application/json' : null),
         },
-        json: async () => ({ installState: { flags: 'disabled' } }),
+        json: async () => ({
+          extensionId: 'vsts-extensions-multivalue-control',
+          installState: { flags: 'disabled' },
+        }),
       })),
     )
     const result = await getMultivalueExtensionStatus(
@@ -116,6 +119,25 @@ describe('adoApi helpers', () => {
       '01234567890123456789',
     )
     expect(result.status).toBe('disabled')
+  })
+
+  it('getMultivalueExtensionStatus rejects a 203 sign-in page (bad PAT)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 203,
+        statusText: 'Non-Authoritative Information',
+        headers: {
+          get: (name) => (name === 'content-type' ? 'text/html; charset=utf-8' : null),
+        },
+        text: async () => '<html>Sign in</html>',
+      })),
+    )
+    await expect(
+      getMultivalueExtensionStatus('https://dev.azure.com/contoso', '01234567890123456789'),
+    ).rejects.toThrow(/ADO 401/)
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('installMultivalueExtension POSTs to extmgmt', async () => {

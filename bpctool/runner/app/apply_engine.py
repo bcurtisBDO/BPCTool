@@ -11,6 +11,7 @@ from .ado_client import AdoClient
 from .excel_ir import build_ir
 from .models import ApplyResult, DryRunRequest, DryRunResponse
 from .org_url import normalize_ado_org_url, parse_ado_org_url
+from .paths import output_root
 from .planner import STEP_ORDER, build_dry_run_plan
 from .timing import format_duration_ms, summarize_timings
 from .writers import (
@@ -26,6 +27,10 @@ from .writers import (
 Emit = Callable[[dict[str, Any]], None]
 
 
+class RunCancelled(Exception):
+    """Raised at a safe checkpoint after the user cancels a job."""
+
+
 def _safe_part(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
     return slug.strip("._-") or "ado"
@@ -34,8 +39,7 @@ def _safe_part(value: str) -> str:
 def default_output_dir(org_url: str, project_name: str) -> Path:
     parsed = parse_ado_org_url(org_url)
     org = parsed.org if parsed.ok else "org"
-    root = Path(__file__).resolve().parents[2] / "runner-out"
-    return root / _safe_part(f"{org}_{project_name}")
+    return output_root() / _safe_part(f"{org}_{project_name}")
 
 
 def run_apply(
@@ -46,18 +50,30 @@ def run_apply(
     emit: Emit | None = None,
     step_filter: list[str] | None = None,
     catalog_limit: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ApplyResult:
     events: list[dict[str, Any]] = []
     timings: list[dict[str, Any]] = []
     run_started = time.perf_counter()
+    cancel_requested = should_cancel or (lambda: False)
 
     def _emit(event: dict[str, Any]) -> None:
         events.append(event)
         if emit:
             emit(event)
 
+    def check_cancel() -> None:
+        if cancel_requested():
+            raise RunCancelled("Run cancelled by user")
+
     def step_emit(step_id: str, message: str) -> None:
         _emit({"type": "step-progress", "stepId": step_id, "message": message})
+        # Catalog handles cancel itself so in-flight creates are recorded in the id-map.
+        if step_id != "catalog":
+            check_cancel()
+
+    def catalog_progress(payload: dict[str, Any]) -> None:
+        _emit({"type": "catalog-progress", "stepId": "catalog", **payload})
 
     ir = build_ir(
         request.excel_file,
@@ -132,6 +148,7 @@ def run_apply(
             step = planned.get(step_id)
             if not step:
                 continue
+            check_cancel()
             action = step.get("planned_action")
             if action == "skip":
                 step_results[step_id] = {"skipped": True, "duration_ms": 0}
@@ -189,6 +206,8 @@ def run_apply(
                     parallel_workers=int(
                         getattr(request, "catalog_parallel_workers", 4) or 4
                     ),
+                    progress=catalog_progress,
+                    should_cancel=cancel_requested,
                 )
             elif step_id == "report":
                 result = apply_report(
@@ -209,6 +228,17 @@ def run_apply(
             timings.append(
                 {"stepId": step_id, "durationMs": duration_ms, "skipped": False}
             )
+            if step_id == "catalog" and cancel_requested():
+                _emit(
+                    {
+                        "type": "step-cancelled",
+                        "stepId": step_id,
+                        "durationMs": duration_ms,
+                        "message": f"Stopped {step_id} after {format_duration_ms(duration_ms)}",
+                        "result": result,
+                    }
+                )
+                raise RunCancelled("Run cancelled by user")
             _emit(
                 {
                     "type": "step-completed",
@@ -219,6 +249,7 @@ def run_apply(
                 }
             )
 
+        check_cancel()
         # Ensure report exists even if filtered out mid-run
         if "report" not in step_results and (not step_filter or "report" in selected):
             step_started = time.perf_counter()
@@ -260,7 +291,14 @@ def run_apply(
         )
     except Exception as exc:  # noqa: BLE001
         total_ms = int((time.perf_counter() - run_started) * 1000)
-        _emit({"type": "job-error", "message": str(exc), "durationMs": total_ms})
+        cancelled = isinstance(exc, RunCancelled)
+        _emit(
+            {
+                "type": "job-cancelled" if cancelled else "job-error",
+                "message": str(exc),
+                "durationMs": total_ms,
+            }
+        )
         if timings:
             _emit(
                 {
@@ -268,7 +306,8 @@ def run_apply(
                     "durationMs": total_ms,
                     "timings": timings,
                     "message": (
-                        f"Run timing (failed after {format_duration_ms(total_ms)}):\n"
+                        f"Run timing ({'cancelled' if cancelled else 'failed'} after "
+                        f"{format_duration_ms(total_ms)}):\n"
                         f"{summarize_timings(timings, total_ms=total_ms)}"
                     ),
                 }
@@ -280,6 +319,7 @@ def run_apply(
             step_results=step_results,
             output_dir=str(output_dir),
             error=str(exc),
+            cancelled=cancelled,
             events=events,
             duration_ms=total_ms,
             timings=timings,

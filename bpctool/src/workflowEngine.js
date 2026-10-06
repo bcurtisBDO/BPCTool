@@ -60,7 +60,7 @@ export const workflowDefinitions = [
     script: 'runner · backlog',
     description:
       'Configure backlog levels, visibility, and sequencing for the Business Process Catalog workflow.',
-    inputs: ['Backlog worksheet name', 'Apply dry-run mode'],
+    inputs: ['Backlog worksheet name', 'Rehearsal only mode'],
     durationMs: 700,
     phase: 'project',
   },

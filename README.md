@@ -28,8 +28,8 @@ UI screenshots (Connection, workflow cards, run config, Catalog Threads): see [`
 | [`bpctool/README.md`](./bpctool/README.md) | Launch, checklist, workflow, modes |
 | [`bpctool/USER_GUIDE.md`](./bpctool/USER_GUIDE.md) | Full usage, API, troubleshooting |
 | [`bpctool/CHANGELOG.md`](./bpctool/CHANGELOG.md) | Release history |
-| [`bpctool/docs/workflow-and-july-comparison.md`](./bpctool/docs/workflow-and-july-comparison.md) | Workflow, X vs H matrix, catalog parallel/resume/backfill, July vs BPCTool |
-| [`bpctool/docs/reference/`](./bpctool/docs/reference/) | Process template after creation (MSBPC Jul 2026 analysis) |
+| [`bpctool/docs/workflow-and-script-comparison.md`](./bpctool/docs/workflow-and-script-comparison.md) | Workflow, quarterly releases, X vs H, catalog, incremental re-runs & conflicts, reference scripts vs BPCTool |
+| [`bpctool/docs/reference/`](./bpctool/docs/reference/) | Process template after creation (MSBPC snapshot analysis) |
 
 ## Layout
 
@@ -38,8 +38,12 @@ bpctool/
   src/           React UI (Vite)
   runner/        FastAPI Excel→IR→plan→apply engine
   scripts/       Env + Vite local-runner plugin
-  docs/             Workflow & July comparison; reference/ post-create analysis
+  docs/             Workflow & reference-script comparison; reference/ post-create analysis
   Start BPCTool.*  One-click launchers
+  bpctool.env.example  Optional folder settings (copy to bpctool.env)
+  runner-out/      Run outputs per org/project (keep; gitignored)
+
+~/BPC Files/<YYYY-Qn>/  Your template + catalog workbooks, one folder per quarterly release
 ```
 
 Template and catalog workbooks are **not** bundled — supply absolute paths (or set `BPCTOOL_TEMPLATE` / place the guideline beside the catalog folder).

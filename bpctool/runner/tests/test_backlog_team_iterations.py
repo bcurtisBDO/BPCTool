@@ -1,4 +1,4 @@
-"""Team iteration assignment (July Script 4 Part 4)."""
+"""Team iteration assignment (reference Script 4 Part 4)."""
 
 from __future__ import annotations
 

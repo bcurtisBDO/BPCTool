@@ -11,7 +11,7 @@ Emit = Callable[[str, str], None]
 
 
 def multiselect_field_labels(ir: dict[str, Any]) -> set[str]:
-    """Labels marked Multi-select on the Fields sheet (July suggested picklists)."""
+    """Labels marked Multi-select on the Fields sheet (suggested picklists)."""
     return {
         str(field.get("label") or field.get("field_name") or "").strip()
         for field in ir.get("process", {}).get("fields") or []
@@ -111,7 +111,7 @@ def apply_process(
                 )
             continue
 
-        # July behavior:
+        # Reference-script behavior:
         # - Custom=No + Microsoft.VSTS.* → create process-local WIT inheriting the OOB type
         # - Custom=Yes → create custom WIT; do NOT pass Excel Inherit from by default
         #   (avoids duplicate inherited system WIT conflicts)
@@ -169,7 +169,7 @@ def apply_process(
     # Refresh after creates so later steps see process-local refs (Process.Bug, etc.)
     existing = _index_process_wits(client.list_process_wits(process_id))
 
-    # Multi-select Labels (Application family, Products, Industries, …) use July
+    # Multi-select Labels (Application family, Products, Industries, …) use
     # suggested-picklist semantics so semicolon-separated values can be stored;
     # layout then binds the DevLabs multivalue control.
     multiselect_labels = multiselect_field_labels(ir)

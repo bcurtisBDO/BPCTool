@@ -73,6 +73,7 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
             }
         ],
         "request": request,
+        "cancel_event": threading.Event(),
     }
     with _lock:
         _jobs[job_id] = record
@@ -95,11 +96,32 @@ def _append_event(job_id: str, event: dict[str, Any]) -> None:
         job["updated_at"] = payload["timestamp"]
 
 
+def cancel_job(job_id: str) -> JobStatusResponse:
+    """Request cancellation; the apply stops at its next safe checkpoint."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        active = job["status"] in {"queued", "running"}
+        already = job["cancel_event"].is_set()
+    if active and not already:
+        job["cancel_event"].set()
+        _append_event(
+            job_id,
+            {
+                "type": "cancel-requested",
+                "message": "Cancel requested — stopping after in-flight requests finish",
+            },
+        )
+    return get_job(job_id)
+
+
 def _execute_job(job_id: str) -> None:
     job_t0 = time.perf_counter()
     with _lock:
         job = _jobs[job_id]
         request: JobCreateRequest = job["request"]
+        cancel_event: threading.Event = job["cancel_event"]
         started = _now()
         job["status"] = "running"
         job["started_at"] = started
@@ -149,6 +171,7 @@ def _execute_job(job_id: str) -> None:
             emit=on_event,
             step_filter=request.steps,
             catalog_limit=request.catalog_limit,
+            should_cancel=cancel_event.is_set,
         )
 
         finished = _now()
@@ -161,7 +184,21 @@ def _execute_job(job_id: str) -> None:
             job = _jobs[job_id]
             job["apply_result"] = apply_result
             job["result"] = apply_result.plan
-            job["status"] = "succeeded" if apply_result.ok else "failed"
+            if apply_result.ok:
+                status = "succeeded"
+                message = (
+                    f"Apply {'dry-run ' if apply_result.dry_run else ''}finished "
+                    f"({format_duration_ms(duration_ms)})"
+                )
+            elif apply_result.cancelled:
+                status = "cancelled"
+                message = f"Apply cancelled after {format_duration_ms(duration_ms)}"
+            else:
+                status = "failed"
+                message = (
+                    f"Apply failed after {format_duration_ms(duration_ms)}: {apply_result.error}"
+                )
+            job["status"] = status
             job["error"] = apply_result.error
             job["finished_at"] = finished
             job["duration_ms"] = duration_ms
@@ -172,12 +209,7 @@ def _execute_job(job_id: str) -> None:
                     "type": "job-finished",
                     "durationMs": duration_ms,
                     "timings": apply_result.timings,
-                    "message": (
-                        f"Apply {'dry-run ' if apply_result.dry_run else ''}finished "
-                        f"({format_duration_ms(duration_ms)})"
-                        if apply_result.ok
-                        else f"Apply failed after {format_duration_ms(duration_ms)}: {apply_result.error}"
-                    ),
+                    "message": message,
                 }
             )
     except Exception as exc:  # noqa: BLE001 - surface to job status
@@ -200,22 +232,32 @@ def _execute_job(job_id: str) -> None:
             )
 
 
-def get_job(job_id: str) -> JobStatusResponse:
+def get_job(job_id: str, *, since: int = 0) -> JobStatusResponse:
+    """Return job status with events from index ``since`` (incremental polling)."""
     with _lock:
         job = _jobs.get(job_id)
         if not job:
             raise KeyError(job_id)
+        events = job["events"]
+        offset = max(0, min(int(since or 0), len(events)))
+        apply_result = job["apply_result"]
+        if apply_result is not None and offset:
+            # Incremental pollers already hold the events; don't resend them all.
+            apply_result = apply_result.model_copy(update={"events": []})
         return JobStatusResponse(
             id=job["id"],
             status=job["status"],
             mode=job["mode"],
+            cancel_requested=job["cancel_event"].is_set(),
             created_at=job["created_at"],
             updated_at=job["updated_at"],
             started_at=job.get("started_at"),
             finished_at=job.get("finished_at"),
             duration_ms=job.get("duration_ms"),
             result=job["result"],
-            apply_result=job["apply_result"],
+            apply_result=apply_result,
             error=job["error"],
-            events=list(job["events"]),
+            events=list(events[offset:]),
+            event_offset=offset,
+            event_total=len(events),
         )

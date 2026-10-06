@@ -1,4 +1,4 @@
-"""Backlog level rename/create and WIT→behavior assignment (July Script 4 Parts 1–2)."""
+"""Backlog level rename/create and WIT→behavior assignment (reference Script 4 Parts 1–2)."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ class BehaviorFakeClient:
         return None
 
 
-JULY_BACKLOGS = [
+TEMPLATE_BACKLOGS = [
     {
         "name": "Highest",
         "type": "Portfolio backlog",
@@ -156,7 +156,7 @@ def test_configure_backlog_levels_renames_and_creates() -> None:
     events: list[str] = []
     refs = _configure_backlog_levels(
         client,
-        {"process": {"backlogs": JULY_BACKLOGS}},
+        {"process": {"backlogs": TEMPLATE_BACKLOGS}},
         "proc-1",
         stats,
         lambda _s, m: events.append(m),
@@ -213,7 +213,7 @@ def test_configure_heals_duplicate_levels_left_beside_epics() -> None:
     events: list[str] = []
     refs = _configure_backlog_levels(
         client,
-        {"process": {"backlogs": JULY_BACKLOGS}},
+        {"process": {"backlogs": TEMPLATE_BACKLOGS}},
         "proc-1",
         stats,
         lambda _s, m: events.append(m),

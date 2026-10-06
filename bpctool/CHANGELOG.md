@@ -2,14 +2,87 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-10 — Clearer run modes: Preview plan / Rehearsal only / live
+
+- **Preview plan** (was “Preview plan (dry-run)”): builds the plan from the Excel only; no Azure DevOps calls.
+- **Rehearsal only** (was “Apply dry-run”): runs every selected step without changing Azure DevOps and writes preview files. The run button reads **Rehearse selected flow**, with an amber note.
+- **Live run**: the button reads **Run selected flow (live)** and is outlined red, with a note naming the target org / process / project.
+- API names are unchanged (`POST /plan/dry-run`, `apply_dry_run`).
+- Fix: an invalid or expired PAT (HTTP 203 sign-in page) no longer shows the Multivalue extension as “installed”; it now reports an authentication error.
+- Dark-mode styling for the rehearsal checkbox box and run-mode notes; README screenshots retaken for consistency (dark mode, same width, illustrative `/Users/you/BPC Files/2026-Q4` paths): `ui-connection.png`, `ui-workflow.png`, `ui-run-config.png`, `ui-actions.png`, new `ui-actions-rehearsal.png`.
+
+## 2026-10 — Folder layout: release folders, output root, `bpctool.env`
+
+- **No hard-coded user paths.** Catalog root defaults to `~/BPC Files` (was `/Users/bill/BPC Files` in runner + UI); the UI catalog field starts empty and is filled from the runner
+- **Release folders:** new `runner/app/paths.py`. When the root holds no workbooks itself, `/defaults` picks the newest release subfolder (`YYYY-Qn` names by name, otherwise newest workbook mtime; `_` / `.` folders ignored) and returns `release_label`, `bpc_files_root`, `output_root`. Flat layouts still work
+- UI loads runner defaults once on page open without overwriting typed paths; release folder name pre-fills a blank **Workbook version**; Run configuration shows where run outputs go and why to keep them. Path picker adds a "Latest release" shortcut
+- **Output root:** `BPCTOOL_OUTPUT_DIR` overrides `bpctool/runner-out` (keeps `ado-id-map.csv` safe from app-folder replacement)
+- **`bpctool.env`:** launcher reads `BPCTOOL_*` keys from `bpctool/bpctool.env` (gitignored; see `bpctool.env.example`) so double-click users can set folders; real env vars win
+- **Preview plan warnings:** several catalog workbooks of one kind in the folder (mixed releases → duplicates); catalog folder that only has release subfolders; template and catalog in sibling release folders
+- Docs: USER_GUIDE §2 **Folder layout** (tree, rules, resolution order, outputs, env file), §10 new-release checklist, §11 / §15 / §18; README folder layout
+- Tests: `test_paths.py` (release resolution, env overrides, warnings), `runnerEnvFile.test.js`; local-data tests use the same discovery instead of a fixed path
+
+## 2026-10 — Release-agnostic template & catalog (quarterly updates)
+
+- The template guideline, catalog workbooks, and Microsoft reference scripts are refreshed quarterly; code, UI, tests, and docs no longer reference one specific release
+- **Template discovery** (`/defaults`, pytest fixture): newest `ADO template guideline*.xlsx` in the catalog folder (any release suffix) instead of a fixed file name; shared `excel_ir.find_template_workbook`
+- UI **Workbook version** defaults to blank (placeholder suggests a release label such as `2026-Q3`); path examples no longer name a release
+- Docs renamed: `docs/workflow-and-july-comparison.md` → [`docs/workflow-and-script-comparison.md`](./docs/workflow-and-script-comparison.md); `docs/reference/MSBPC-Jul26-analysis.md` → [`docs/reference/MSBPC-process-analysis.md`](./docs/reference/MSBPC-process-analysis.md)
+- USER_GUIDE: quarterly release note, **one release per catalog folder**, and §10 "Moving to a new quarterly release" checklist
+- `IR_VERSION` → `2026.10-1`
+
+## 2026-10 — Work item types matrix: `H` = hidden field
+
+- **Work item types** grid: `H` is now honoured (reference Script 2 ignored it). IR adds `hidden_field_labels` per WIT and `counts.hidden_field_placements`
+- **Layout:** `H` fields are added to the WIT but get no form control; an existing control (e.g. inherited Completed Work / Activity / Stack rank) is hidden via `PATCH …/layout/groups/{group}/controls/{field}` `visible: false`. Changing `H` → `X` shows the control again
+- Warning when an `H` field is required with no default value (users could not fill it on the form)
+- Catalog prevalidate treats `H` fields as on the WIT (required-field defaults apply); dry-run plan / layout log report hidden counts
+- Template at time of change: 15 `H` cells (inherited Action item / Bug / Business task / Issue / Task / Test case effort/build fields, Workshop → Microsoft workshop type)
+- Docs: USER_GUIDE template sheet + Layout step; workflow comparison matrix section now "BPCTool extends the reference scripts"
+
+## 2026-10 — Catalog performance, safe retries, cancel / reattach
+
+**Runner**
+
+- ADO client reuses **keep-alive HTTP(S) connections** per worker thread (stdlib `http.client`; idle sockets are reopened after 60 s)
+- Retries: jittered exponential backoff; `Retry-After` accepted as seconds (incl. decimals) or HTTP-date, capped at 60 s; idempotent calls also retry 500/502/504
+- **Work item create is no longer blindly retried.** Only 429/503 rejections are retried. A network error after a create was sent triggers a WIQL lookup (type + title + `MSBPC.microsoftid`): one match is adopted into `ado-id-map.csv`, no match is retried once, several matches fail as possible duplicates. Stats: `reconciled`, `outcome_unknown`
+- Catalog scheduler: heap **ready queue** with a children-by-parent index (children queue as soon as their parent is created) instead of re-scanning all pending drafts per wave
+- **Parent-link backfill** skips rows whose id-map `ParentId` matches (linked in the create payload → `already_linked`, no GET) and checks the rest in parallel with the catalog worker count
+- **Cancel:** `POST /jobs/{id}/cancel`; job status `cancelled`. Stops between steps, at step progress checkpoints, and in Catalog Import after in-flight creates (recorded in the id map); backfill skipped; catalog step emits `step-cancelled`
+- `GET /jobs/{id}?since=N` returns only new events (`event_offset`, `event_total`); `catalog-progress` events (create + backfill phases) about once a second; text progress lines every 500 items
+
+**UI**
+
+- **Cancel run** calls the runner cancel endpoint (shows **Cancelling…**); steps completed before cancel are cached, Catalog is not (re-run resumes)
+- Reloading the page **reattaches** to a running Runner job (tab `sessionStorage`) and replays its log
+- Catalog **progress bar** with done/total, created/skipped/failed, and ETA
+- Runner mode: **Threads** renamed **Catalog workers**; Retry count and layout/backlog worksheet names hidden (Simulate/API only)
+- Polling uses the incremental `since` API
+
+**Review fixes**
+
+- Pooled client honours `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` and macOS system proxy settings (CONNECT tunnel, optional `user:pass@` proxy auth) — parity with the previous `urllib` client
+- Sends a `User-Agent`; HTTP 203 sign-in page (invalid/expired PAT) raises a clear auth error instead of a JSON parse failure
+- Unknown-outcome creates always record a blank `ParentId` (adopted or retried) so backfill verifies the link
+- Cancel: drafts under a failed parent stay `Parent not imported` failures; only work blocked by unstarted items counts as `cancelled`
+- UI polling survives up to 8 consecutive transient poll failures (backoff) before giving up; 404 still stops immediately
+- **Cancel run** pressed before the runner returns the job id is queued and sent once the id arrives (previously only polling stopped)
+
+**Tests:** ready queue, cancel, unknown-outcome create reconcile, backfill skip/parallel, client retry rules, job cancel + `since`, progress summary (vitest)
+
+## 2026-10 — Docs: workflow & reference-script comparison (re-runs / conflicts)
+
+- [`docs/workflow-and-script-comparison.md`](./docs/workflow-and-script-comparison.md) assessment **2026-10-06**: incremental re-run table (update policies, per-step create/skip/heal), catalog backfill conflict statuses, process rules gap (neither the guideline Excel nor BPCTool), comparison + residual rows refreshed
+
 ## 2026-08 — Docs: audit sync (re-run semantics + X vs H)
 
 - USER_GUIDE: Work item types matrix **`X` only** (`H` ignored); §10 table for what subsequent spreadsheet runs update (catalog create-only / resume)
 - Repo docs already covered Catalog parallel/resume/backfill, Multivalue required, empty Description, picklist case-normalize; workflow comparison + indexes dated 2026-08-11
 
-## 2026-08 — Docs: workflow & July comparison (current assessment)
+## 2026-08 — Docs: workflow & reference-script comparison (current assessment)
 
-- [`docs/workflow-and-july-comparison.md`](./docs/workflow-and-july-comparison.md): assessment date; template matrix **X vs H** parity; UI Runner/API/Simulate; Catalog parallel/resume/backfill + prevalidate notes; comparison table rows for matrix / prevalidate / execution modes
+- [`docs/workflow-and-script-comparison.md`](./docs/workflow-and-script-comparison.md): assessment date; template matrix **X vs H** parity; UI Runner/API/Simulate; Catalog parallel/resume/backfill + prevalidate notes; comparison table rows for matrix / prevalidate / execution modes
 
 ## 2026-08 — Docs: README UI screenshots
 
@@ -17,12 +90,12 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 
 ## 2026-08 — Docs: catalog parallel / resume / backfill
 
-- [`docs/workflow-and-july-comparison.md`](./docs/workflow-and-july-comparison.md) updated for Catalog Import assessment (parallel workers, id-map resume, parent-link backfill, hierarchy-only relations, residual vs July)
+- [`docs/workflow-and-script-comparison.md`](./docs/workflow-and-script-comparison.md) updated for Catalog Import assessment (parallel workers, id-map resume, parent-link backfill, hierarchy-only relations, residual vs the reference scripts)
 - USER_GUIDE / README job field `catalog_parallel_workers`, artifacts, troubleshooting, quick reference
 
 ## 2026-08 — Catalog: parallel create, resume, parent-link backfill
 
-- Catalog Import uses **parent-aware parallel workers** (UI **Threads**, default 4; clamp 1–16; July-style ready queue)
+- Catalog Import uses **parent-aware parallel workers** (UI **Threads**, default 4; clamp 1–16; reference-script style ready queue)
 - **Resume** from existing `ado-id-map.csv` (skip keys already imported; append new rows)
 - After create, **parent-link backfill** checks Hierarchy-Reverse and writes `backfill-links-report.csv` (link / already_linked / conflict / failed)
 - Children wait until the parent id exists (no create-unlinked when parent failed — counted as `Parent not imported`)
@@ -50,7 +123,7 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 
 ## 2026-08 — Reference: post-create process analysis
 
-- Added [`docs/reference/MSBPC-Jul26-analysis.md`](./docs/reference/MSBPC-Jul26-analysis.md) — WIT/states/fields snapshot of process `MSBPCTemplate` after template apply
+- Added [`docs/reference/MSBPC-process-analysis.md`](./docs/reference/MSBPC-process-analysis.md) — WIT/states/fields snapshot of process `MSBPCTemplate` after template apply
 
 ## 2026-08 — Repo root cleanup
 
@@ -83,7 +156,7 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 
 ## 2026-08 — Multi-value picklists + catalog prevalidate
 
-- Fields marked **Multi-select** (Application family, Products, Industries, …) create July-style **suggested** picklists (`isSuggested` / `isPicklistSuggested`) so semicolon-separated values import
+- Fields marked **Multi-select** (Application family, Products, Industries, …) create **suggested** picklists (`isSuggested` / `isPicklistSuggested`) so semicolon-separated values import
 - Layout binds DevLabs **Multivalue** control for those fields (later: extension **required** via Connection/runner preflight — see Multivalue preflight entry above; no longer “optional fallback”)
 - Catalog **prevalidate** before create: strip `Area Path=Not found`, strip Test Case `State=New`, strip invalid single picklist values, normalize multi-select tokens; writes `import-prevalidate.json` (later: case-insensitive picklist align — see picklist entry above)
 - Module: `catalog_validate.py`; tests for prevalidate, multiselect labels, layout control type
@@ -109,14 +182,14 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 ## 2026-08 — Disabled WITs + backlog levels from Excel
 
 - Keep Excel-disabled WITs (Epic / Feature / User story) in IR; Process materializes then `isDisabled`
-- Backlog step follows July Script 4: rename/create levels from **Backlogs** sheet, assign WITs, set defaults
+- Backlog step follows reference Script 4: rename/create levels from **Backlogs** sheet, assign WITs, set defaults
 - Heal prior buggy applies that created custom Levels/Lowest beside system Epics/Features (delete duplicate, rename Agile behaviors)
 - Tests for rename matrix, duplicate heal, WIT assign skip-disabled, defaults
 
 ## 2026-08 — Teams, areas, iterations
 
 - Team area paths: aggregate all Excel paths per team into one `teamfieldvalues` PATCH (`includeChildren: false` by default)
-- Area paths parse July L1–L4 (skip project column); root area path UI defaults to **project name**
+- Area paths parse L1–L4 (skip project column); root area path UI defaults to **project name**
 - Backlog step sets team `backlogIteration` from classification tree root GUID before selecting iterations (fixes blank Backlog iteration / blocked Select iteration)
 - Assigns child iterations to each Teams-sheet team; optional include-children when Excel says Yes
 
@@ -134,22 +207,22 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 - `npm run setup` / `npm start` bootstrap env and open the browser
 - Default execution mode is **Runner**
 
-## 2026-08 — Standalone July replacement (P0/P1)
+## 2026-08 — Standalone reference-script replacement (P0/P1)
 
 ### Summary
 
-Replaced the fragile “UI wraps Microsoft July Python scripts” approach with a **standalone** control plane + execution plane:
+Replaced the fragile “UI wraps Microsoft reference Python scripts” approach with a **standalone** control plane + execution plane:
 
 - React UI orchestrates configuration, policy, and progress
 - Local FastAPI runner owns Excel parsing, planning, and ADO apply
-- No subprocess calls to July `.py` scripts
+- No subprocess calls to the reference `.py` scripts
 
 ### Architecture
 
 | Before | After |
 |--------|-------|
-| Shell out to six July scripts via env vars | In-process writers via Azure DevOps REST |
-| Process + project created together (July phase 1) | Hard gate: **process → layout → project** |
+| Shell out to six reference scripts via env vars | In-process writers via Azure DevOps REST |
+| Process + project created together (reference phase 1) | Hard gate: **process → layout → project** |
 | Excel read live during each script | Excel → IR → plan → apply → report |
 | Limited UI observability | Structured job events + `runner-out/` artifacts |
 
@@ -163,7 +236,7 @@ Added FastAPI app on `127.0.0.1:8787` (proxied as `/api` from Vite):
 
 | Module | Role |
 |--------|------|
-| `excel_ir.py` | Parse July template sheets + catalog folder into IR |
+| `excel_ir.py` | Parse template guideline sheets + catalog folder into IR |
 | `planner.py` | Deterministic dry-run plan + update-policy gates |
 | `richtext.py` | HTML detection; optional markdown→HTML |
 | `catalog_import.py` | Catalog drafts, Title 1..N parents, multiline format flags |
@@ -196,7 +269,7 @@ API surface:
 - **Preview plan (dry-run)** wired to runner
 - **Run** in Runner mode posts `/api/jobs` and polls events
 - Workflow cards expanded to include **catalog** and **report**
-- Removed dependency on July script filenames as executors (labels now `runner · <step>`)
+- Removed dependency on reference script filenames as executors (labels now `runner · <step>`)
 
 ### Rich text (ADO Toolkit parity)
 
@@ -209,7 +282,7 @@ API surface:
 ### Inputs / defaults
 
 - Template: user-provided ADO guideline `.xlsx` (optional discover under catalog folder / `BPCTOOL_TEMPLATE`)
-- Catalog sources default: `/Users/bill/BPC Files` (JUL 2026 package)
+- Catalog sources default: `/Users/bill/BPC Files` (current quarterly package)
 - Apply artifacts: `runner-out/<org>_<project>/` (gitignored)
 
 ### Tooling
@@ -221,8 +294,8 @@ API surface:
 ### Explicitly not done / residual risk
 
 - **DevLabs Multivalue extension is required** for process / layout / project; UI/runner preflight + optional install via Extension Management API; Marketplace/admin if PAT cannot install
-- Catalog Import: parent-aware parallel workers + id-map resume + parent-link backfill (July-aligned); still create-only (no WIP field upsert)
-- Not every July script edge case is ported
+- Catalog Import: parent-aware parallel workers + id-map resume + parent-link backfill (reference-script aligned); still create-only (no WIP field upsert)
+- Not every reference script edge case is ported
 - Inherited system WIT disable via Process API can still fail (manual ADO UI fallback)
 - Empty catalog Description omits `System.Description` (no synthetic placeholder)
 - In-memory jobs only (lost on runner restart)

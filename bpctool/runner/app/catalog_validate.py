@@ -53,7 +53,7 @@ class PrevalidateResult:
 
 
 def split_multi_select(value: str) -> list[str]:
-    """Split semicolon-separated multi-select storage (July / DevLabs style)."""
+    """Split semicolon-separated multi-select storage (DevLabs Multivalue style)."""
     return [part.strip() for part in str(value).split(";") if part.strip()]
 
 

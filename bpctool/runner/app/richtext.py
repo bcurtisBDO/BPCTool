@@ -75,7 +75,7 @@ def _list_indent(prefix: str) -> int:
 
 
 def markdown_to_html(value: Any) -> str:
-    """Convert markdown-like plain text (July catalog style) to ADO HTML."""
+    """Convert markdown-like plain text (catalog workbook style) to ADO HTML."""
     text = "" if value is None else str(value).replace("\r\n", "\n").replace("\r", "\n")
     text = text.strip("\n")
     if not text.strip():

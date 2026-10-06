@@ -1,4 +1,4 @@
-"""Team area assignment aggregation (July Script 3 semantics)."""
+"""Team area assignment aggregation (reference Script 3 semantics)."""
 
 from __future__ import annotations
 

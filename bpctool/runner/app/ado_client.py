@@ -3,21 +3,137 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
+import random
+import threading
 import time
+from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.request import getproxies, proxy_bypass
 
 from .org_url import normalize_ado_org_url, parse_ado_org_url
 
+USER_AGENT = "BPCTool-runner (python http.client)"
+REQUEST_TIMEOUT_S = 120
+# Azure front doors drop idle keep-alive sockets after a few minutes.
+IDLE_RECONNECT_S = 60.0
+MAX_RETRY_DELAY_S = 60.0
+
+# Statuses where ADO did not process the request, so any method may be retried.
+_REJECTED_STATUSES = {429, 503}
+# Additional statuses retried only for idempotent calls (request may have run).
+_IDEMPOTENT_RETRY_STATUSES = {500, 502, 504}
+
 
 class AdoError(RuntimeError):
-    def __init__(self, message: str, *, status: int | None = None, transient: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        transient: bool = False,
+        outcome_unknown: bool = False,
+    ):
         super().__init__(message)
         self.status = status
         self.transient = transient
+        self.outcome_unknown = outcome_unknown
+
+
+def _proxy_for(scheme: str, host: str) -> Any:
+    """Proxy URL for a target, honouring *_PROXY / NO_PROXY and macOS system settings."""
+    proxy = getproxies().get(scheme)
+    if not proxy or proxy_bypass(host):
+        return None
+    return urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+
+
+class _ConnectionPool:
+    """Per-thread keep-alive HTTP(S) connections keyed by scheme + host."""
+
+    def __init__(self, timeout: float) -> None:
+        self._timeout = timeout
+        self._local = threading.local()
+
+    def _conns(self) -> dict[tuple[str, str], list[Any]]:
+        conns = getattr(self._local, "conns", None)
+        if conns is None:
+            conns = self._local.conns = {}
+        return conns
+
+    def get(
+        self, scheme: str, netloc: str
+    ) -> tuple[http.client.HTTPConnection, dict[str, str] | None]:
+        """Return (connection, proxy headers when requests go via a plain-HTTP proxy).
+
+        A non-None second value means the request target must be the absolute URL.
+        """
+        conns = self._conns()
+        key = (scheme, netloc)
+        entry = conns.get(key)
+        now = time.monotonic()
+        if entry is not None and now - entry[2] > IDLE_RECONNECT_S:
+            self.discard(scheme, netloc)
+            entry = None
+        if entry is None:
+            conn, http_proxy_headers = self._open(scheme, netloc)
+            entry = [conn, http_proxy_headers, now]
+            conns[key] = entry
+        entry[2] = now
+        return entry[0], entry[1]
+
+    def _open(
+        self, scheme: str, netloc: str
+    ) -> tuple[http.client.HTTPConnection, dict[str, str] | None]:
+        target = urlsplit(f"{scheme}://{netloc}")
+        proxy = _proxy_for(scheme, target.hostname or netloc)
+        if proxy is None or not proxy.hostname:
+            cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+            return cls(netloc, timeout=self._timeout), None
+        proxy_port = proxy.port or (443 if proxy.scheme == "https" else 80)
+        proxy_headers: dict[str, str] = {}
+        if proxy.username:
+            credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}"
+            proxy_headers["Proxy-Authorization"] = (
+                "Basic " + base64.b64encode(credentials.encode("utf-8")).decode("ascii")
+            )
+        if scheme == "https":
+            conn = http.client.HTTPSConnection(proxy.hostname, proxy_port, timeout=self._timeout)
+            conn.set_tunnel(target.hostname or netloc, target.port or 443, headers=proxy_headers)
+            return conn, None
+        conn = http.client.HTTPConnection(proxy.hostname, proxy_port, timeout=self._timeout)
+        return conn, proxy_headers
+
+    def discard(self, scheme: str, netloc: str) -> None:
+        entry = self._conns().pop((scheme, netloc), None)
+        if entry is not None:
+            try:
+                entry[0].close()
+            except OSError:
+                pass
+
+
+def retry_delay_seconds(retry_after: str | None, attempt: int) -> float:
+    """Honor Retry-After (seconds or HTTP-date); else jittered exponential backoff."""
+    if retry_after:
+        value = retry_after.strip()
+        try:
+            return min(MAX_RETRY_DELAY_S, max(0.0, float(value)))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(value)
+            return min(MAX_RETRY_DELAY_S, max(0.0, when.timestamp() - time.time()))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    base = min(30.0, 1.5 * (2**attempt))
+    return base * (0.75 + random.random() * 0.5)
+
+
+def _wiql_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 class AdoClient:
@@ -32,6 +148,7 @@ class AdoClient:
         token = base64.b64encode(f":{pat.strip()}".encode("utf-8")).decode("ascii")
         self._auth = f"Basic {token}"
         self.api_version = api_version
+        self._pool = _ConnectionPool(REQUEST_TIMEOUT_S)
 
     def url(self, path: str, *, project: str | None = None, api_version: str | None = None) -> str:
         version = api_version or self.api_version
@@ -56,42 +173,85 @@ class AdoClient:
         content_type: str | None = None,
         retry_attempts: int = 5,
         absolute_url: str | None = None,
+        idempotent: bool = True,
     ) -> Any:
+        """Send a request with retries.
+
+        ``idempotent=False`` (work item create) never retries after the request
+        may have reached ADO: network errors raise ``outcome_unknown`` and only
+        429/503 rejections are retried.
+        """
         url = absolute_url or self.url(path, project=project, api_version=api_version)
         data = None
         headers = {
             "Authorization": self._auth,
             "Accept": "application/json",
+            "User-Agent": USER_AGENT,
         }
         if json_body is not None:
             data = json.dumps(json_body).encode("utf-8")
             headers["Content-Type"] = content_type or "application/json"
 
-        last_error: Exception | None = None
-        for attempt in range(retry_attempts):
-            request = Request(url, data=data, headers=headers, method=method.upper())
+        retry_statuses = (
+            _REJECTED_STATUSES | _IDEMPOTENT_RETRY_STATUSES if idempotent else _REJECTED_STATUSES
+        )
+        attempts = max(1, retry_attempts)
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
             try:
-                with urlopen(request, timeout=120) as response:
-                    raw = response.read()
-                    if not raw:
-                        return None
-                    return json.loads(raw.decode("utf-8"))
-            except HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")[:500]
-                transient = exc.code in {429, 503}
-                message = f"ADO {exc.code} {exc.reason}: {body}"
-                if not transient or attempt == retry_attempts - 1:
-                    raise AdoError(message, status=exc.code, transient=transient) from exc
-                retry_after = exc.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after and retry_after.isdigit() else (1.5 * (attempt + 1))
-                time.sleep(delay)
-                last_error = exc
-            except URLError as exc:
-                if attempt == retry_attempts - 1:
-                    raise AdoError(f"Network error talking to Azure DevOps: {exc}", transient=True) from exc
-                time.sleep(1.5 * (attempt + 1))
-                last_error = exc
-        raise AdoError(f"ADO request failed: {last_error}", transient=True)
+                status, reason, retry_after, raw = self._send(method.upper(), url, data, headers)
+            except (http.client.HTTPException, OSError) as exc:
+                if not idempotent:
+                    raise AdoError(
+                        f"Network error talking to Azure DevOps (outcome unknown, not retried): {exc}",
+                        transient=True,
+                        outcome_unknown=True,
+                    ) from exc
+                if last:
+                    raise AdoError(
+                        f"Network error talking to Azure DevOps: {exc}", transient=True
+                    ) from exc
+                time.sleep(retry_delay_seconds(None, attempt))
+                continue
+
+            if status == 203:
+                # ADO answers an invalid/expired PAT with a 203 HTML sign-in page.
+                raise AdoError(
+                    "Azure DevOps returned a sign-in page (HTTP 203): the PAT is invalid, "
+                    "expired, or lacks the required scopes.",
+                    status=401,
+                )
+            if 200 <= status < 300:
+                if not raw:
+                    return None
+                return json.loads(raw.decode("utf-8"))
+
+            body = raw.decode("utf-8", errors="replace")[:500]
+            transient = status in _REJECTED_STATUSES | _IDEMPOTENT_RETRY_STATUSES
+            if status not in retry_statuses or last:
+                raise AdoError(f"ADO {status} {reason}: {body}", status=status, transient=transient)
+            time.sleep(retry_delay_seconds(retry_after, attempt))
+        raise AdoError("ADO request failed after retries", transient=True)
+
+    def _send(
+        self, method: str, url: str, data: bytes | None, headers: dict[str, str]
+    ) -> tuple[int, str, str | None, bytes]:
+        parts = urlsplit(url)
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        conn, http_proxy_headers = self._pool.get(parts.scheme, parts.netloc)
+        if http_proxy_headers is not None:
+            target = url
+            headers = {**headers, **http_proxy_headers}
+        try:
+            conn.request(method, target, body=data, headers=headers)
+            response = conn.getresponse()
+            raw = response.read()
+        except (http.client.HTTPException, OSError):
+            self._pool.discard(parts.scheme, parts.netloc)
+            raise
+        if response.will_close:
+            self._pool.discard(parts.scheme, parts.netloc)
+        return response.status, response.reason, response.getheader("Retry-After"), raw
 
     def get(self, path: str, **kwargs: Any) -> Any:
         return self.request("GET", path, **kwargs)
@@ -307,7 +467,29 @@ class AdoClient:
             project=project,
             json_body=patch,
             content_type="application/json-patch+json",
+            idempotent=False,
         )
+
+    def find_work_item_ids(
+        self,
+        project: str,
+        work_item_type: str,
+        *,
+        title: str,
+        field_ref: str | None = None,
+        field_value: Any = None,
+    ) -> list[int]:
+        """WIQL lookup used to reconcile a create whose outcome is unknown."""
+        clauses = [
+            "[System.TeamProject] = @project",
+            f"[System.WorkItemType] = {_wiql_literal(work_item_type)}",
+            f"[System.Title] = {_wiql_literal(title)}",
+        ]
+        if field_ref and field_value not in (None, ""):
+            clauses.append(f"[{field_ref}] = {_wiql_literal(field_value)}")
+        query = "SELECT [System.Id] FROM WorkItems WHERE " + " AND ".join(clauses)
+        data = self.post("/_apis/wit/wiql", {"query": query}, project=project) or {}
+        return [int(item["id"]) for item in data.get("workItems") or [] if "id" in item]
 
     def get_parent_id(self, project: str, work_item_id: int) -> int | None:
         """Return Hierarchy-Reverse parent id, or None if unlinked."""

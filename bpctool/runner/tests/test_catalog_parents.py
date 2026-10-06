@@ -11,8 +11,9 @@ from app.catalog_import import (
 )
 from app.excel_ir import build_ir
 from app.mapping import build_mapping_from_ir
+from app.paths import bpc_files_root, resolve_release_folder
 
-CATALOG = Path("/Users/bill/BPC Files")
+CATALOG = resolve_release_folder(bpc_files_root()) or bpc_files_root()
 
 
 def test_title_hierarchy_parents_for_outline_rows() -> None:
@@ -104,7 +105,7 @@ def test_explicit_parent_column_wins_over_title_outline() -> None:
     assert drafts[1].parent_key == "forced-parent"
 
 
-def test_july_catalog_parents_use_title_outline(template_path) -> None:
+def test_catalog_parents_use_title_outline(template_path) -> None:
     if not CATALOG.is_dir():
         return
     ir = build_ir(

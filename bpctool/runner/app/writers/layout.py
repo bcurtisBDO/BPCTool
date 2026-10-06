@@ -24,15 +24,24 @@ def apply_layout(
         "html_controls": 0,
         "controls": 0,
         "fields_added": 0,
+        "hidden_fields": 0,
+        "controls_hidden": 0,
+        "controls_shown": 0,
         "warnings": 0,
     }
 
     html_count = ir["counts"].get("html_fields", 0)
+    hidden_count = ir["counts"].get("hidden_field_placements", 0)
     if dry_run:
         emit(
             "layout",
             f"[dry-run] Would apply layouts for {len(ir['process']['work_item_types'])} WITs "
-            f"including {html_count} HtmlFieldControl placements",
+            f"including {html_count} HtmlFieldControl placements"
+            + (
+                f" and {hidden_count} hidden (H) fields added to WITs without a visible control"
+                if hidden_count
+                else ""
+            ),
         )
         return stats
 
@@ -46,8 +55,9 @@ def apply_layout(
     process_wit_map = _index_process_wits(client.list_process_wits(process_id))
 
     for wit in ir["process"]["work_item_types"]:
-        labels = wit.get("applicable_field_labels") or []
-        if not labels:
+        placements = [(label, False) for label in wit.get("applicable_field_labels") or []]
+        placements += [(label, True) for label in wit.get("hidden_field_labels") or []]
+        if not placements:
             continue
         if wit.get("disabled"):
             continue
@@ -66,7 +76,7 @@ def apply_layout(
             stats["warnings"] += 1
             continue
 
-        # Materialize system WITs before field/layout mutation (July ensure_inherited_wit_customized).
+        # Materialize system WITs before field/layout mutation (reference ensure_inherited_wit_customized).
         if _is_system_reference(wit_ref):
             if _materialize_system_wit(client, process_id, wit_ref, process_wit):
                 process_wit_map = _index_process_wits(client.list_process_wits(process_id))
@@ -77,7 +87,7 @@ def apply_layout(
         stats["wits_processed"] += 1
         enc_wit = quote(wit_api_id, safe="")
 
-        for label in labels:
+        for label, hidden in placements:
             field = fields_by_label.get(label)
             if not field:
                 continue
@@ -120,7 +130,33 @@ def apply_layout(
                 stats["warnings"] += 1
                 break
 
-            if _control_exists_on_page(layout, None, ref):
+            group_id, control = _find_control(layout, ref)
+            if hidden:
+                stats["hidden_fields"] += 1
+                if _parse_required(field.get("required")) and not _has_default(field):
+                    emit(
+                        "layout",
+                        f"Hidden field {ref} on {wit_name} is required with no default value; "
+                        "users cannot fill it on the form",
+                    )
+                    stats["warnings"] += 1
+                if control is not None and control.get("visible", True):
+                    if _set_control_visibility(
+                        client, process_id, enc_wit, group_id, ref, visible=False, emit=emit
+                    ):
+                        stats["controls_hidden"] += 1
+                    else:
+                        stats["warnings"] += 1
+                continue
+
+            if control is not None:
+                if control.get("visible", True) is False:
+                    if _set_control_visibility(
+                        client, process_id, enc_wit, group_id, ref, visible=True, emit=emit
+                    ):
+                        stats["controls_shown"] += 1
+                    else:
+                        stats["warnings"] += 1
                 continue
 
             page_id, layout = _ensure_page(
@@ -191,9 +227,65 @@ def apply_layout(
     emit(
         "layout",
         f"Layout apply finished: {stats['wits_processed']} WITs, "
-        f"{stats['html_controls']} HTML controls, {stats['controls']} other controls",
+        f"{stats['html_controls']} HTML controls, {stats['controls']} other controls"
+        + (
+            f", {stats['hidden_fields']} hidden (H) fields "
+            f"({stats['controls_hidden']} existing controls hidden)"
+            if stats["hidden_fields"]
+            else ""
+        )
+        + (f", {stats['controls_shown']} controls un-hidden" if stats["controls_shown"] else ""),
     )
     return stats
+
+
+def _find_control(
+    layout: dict[str, Any] | None, field_ref: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return (group id, control) for the field's control anywhere on the form."""
+    target = field_ref.lower()
+    for page in (layout or {}).get("pages") or []:
+        for section in page.get("sections") or []:
+            for group in section.get("groups") or []:
+                for control in group.get("controls") or []:
+                    if str(control.get("id") or "").lower() == target:
+                        return group.get("id"), control
+    return None, None
+
+
+def _set_control_visibility(
+    client: AdoClient,
+    process_id: str,
+    enc_wit: str,
+    group_id: str | None,
+    field_ref: str,
+    *,
+    visible: bool,
+    emit: Emit,
+) -> bool:
+    if not group_id:
+        return False
+    try:
+        client.patch(
+            f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}"
+            f"/layout/groups/{quote(group_id, safe='')}/controls/{quote(field_ref, safe='')}",
+            json_body={"id": field_ref, "visible": visible},
+            api_version="7.1-preview.1",
+        )
+        return True
+    except AdoError as exc:
+        emit(
+            "layout",
+            f"{'Show' if visible else 'Hide'} control {field_ref}: {exc}",
+        )
+        return False
+
+
+def _has_default(field: dict[str, Any]) -> bool:
+    if _is_boolean_field(field):
+        return True
+    value = str(field.get("default_value") or "").strip()
+    return bool(value) and value.lower() != "none"
 
 
 MULTIVALUE_CONTRIBUTION_ID = (
@@ -202,7 +294,7 @@ MULTIVALUE_CONTRIBUTION_ID = (
 
 
 def _control_type(field: dict[str, Any] | str, reference_name: str = "") -> str:
-    """July get_control_type — default is ``Field``, not FieldControl."""
+    """Reference get_control_type — default is ``Field``, not FieldControl."""
     if isinstance(field, dict):
         field_type = field.get("field_type") or ""
         reference_name = field.get("reference_name") or reference_name
@@ -317,7 +409,7 @@ def _add_control_to_group(
     control_type = _control_type(field)
     bodies: list[dict[str, Any]] = []
     if control_type == "MultivalueContribution":
-        # DevLabs multivalue control (July Script 2). Extension must be installed
+        # DevLabs multivalue control (reference Script 2). Extension must be installed
         # on the org; fall back to native picklist control if contribution fails.
         bodies.append(
             {
@@ -417,7 +509,7 @@ def _wit_field_payload(field: dict[str, Any]) -> dict[str, Any]:
 
 
 def _boolean_field_variants(ref: str) -> list[dict[str, Any]]:
-    """July-compatible retry payloads (VS403099 / VS402851)."""
+    """Reference-script compatible retry payloads (VS403099 / VS402851)."""
     variants: list[dict[str, Any]] = [
         {"referenceName": ref, "defaultValue": "false", "visible": True},
         {"referenceName": ref, "defaultValue": False, "visible": True},
@@ -469,7 +561,7 @@ def _ensure_field_on_wit(
     ref = field.get("reference_name")
     if not ref:
         return False
-    # Prefer July camelCase segment; ADO accepts both, but match the script path.
+    # Prefer the reference scripts' camelCase segment; ADO accepts both, but match the script path.
     path = f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}/fields"
     payloads = [_wit_field_payload(field)]
     if _is_boolean_field(field):
@@ -535,7 +627,7 @@ def _resolve_process_wit(
 
 
 def _process_api_wit_id(wit_name: str, wit_ref: str, process_wit: dict[str, Any]) -> str:
-    """July: system Microsoft.VSTS.* refs often need the display name on Process APIs."""
+    """System Microsoft.VSTS.* refs often need the display name on Process APIs."""
     resolved_ref = str(process_wit.get("referenceName") or wit_ref or "").strip()
     resolved_name = str(process_wit.get("name") or wit_name or "").strip()
     if resolved_ref.startswith(SYSTEM_WIT_PREFIX):
@@ -573,7 +665,7 @@ def _materialize_system_wit(
         if exc.status in {400, 409}:
             wit_info["customization"] = "inherited"
             return True
-        # Retry materialize using display name (July fallback path).
+        # Retry materialize using display name (reference fallback path).
         display = str(wit_info.get("name") or "").strip()
         if display and display != wit_ref:
             try:
@@ -686,7 +778,7 @@ def _add_html_control(
     field_order: int,
     layout: dict[str, Any] | None,
 ) -> bool:
-    """HTML controls must be created inside a new group payload (July layout behavior)."""
+    """HTML controls must be created inside a new group payload (reference layout behavior)."""
     if _control_exists_on_page(layout, page_id, ref):
         return True
     try:

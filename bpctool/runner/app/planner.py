@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .models import DryRunResponse, PlanAction
@@ -33,6 +34,20 @@ def _action(
         entity_name=entity_name,
         detail=detail,
         count=count,
+    )
+
+
+def _release_mismatch_warning(excel_file: str | None, catalog_dir: str | None) -> str | None:
+    """Template and catalog in sibling folders usually means two different releases."""
+    if not excel_file or not catalog_dir:
+        return None
+    template_dir = Path(excel_file).parent
+    catalog = Path(catalog_dir)
+    if template_dir == catalog or template_dir.parent != catalog.parent:
+        return None
+    return (
+        f'Template is in "{template_dir.name}" but catalog workbooks are in "{catalog.name}". '
+        "Use the template and catalog files from the same quarterly release."
     )
 
 
@@ -106,6 +121,11 @@ def build_dry_run_plan(
             "summary": (
                 f"Apply field/page layout mappings for {counts['fields']} field placements "
                 f"including HtmlFieldControl for {counts.get('html_fields', 0)} HTML fields"
+                + (
+                    f"; {counts['hidden_field_placements']} hidden (H) field placements"
+                    if counts.get("hidden_field_placements")
+                    else ""
+                )
             ),
         },
         {
@@ -273,8 +293,14 @@ def build_dry_run_plan(
             )
     else:
         warnings.append(
-            "Catalog source directory missing or empty — add the JUL catalog workbooks to include import actions."
+            "Catalog source directory missing or empty — add the current release's catalog workbooks to include import actions."
         )
+    warnings.extend(ir["catalog"].get("warnings", []))
+    release_warning = _release_mismatch_warning(
+        ir["source"].get("excel_file"), ir["source"].get("catalog_source_dir")
+    )
+    if release_warning:
+        warnings.append(release_warning)
 
     actions.append(
         _action(
@@ -282,7 +308,7 @@ def build_dry_run_plan(
             "report",
             "artifact",
             "bpc-ado-setup-summary",
-            "Emit HTML/JSON summary under out/<org>_<project>/",
+            "Emit HTML/JSON summary under runner-out/<org>_<project>/",
         )
     )
 

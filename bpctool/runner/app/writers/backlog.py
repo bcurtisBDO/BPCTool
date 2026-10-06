@@ -1,6 +1,6 @@
 """Configure backlog behaviors, iteration paths, and per-team iteration settings.
 
-Mirrors July Script 4: create iteration nodes, then for each Teams-sheet row set
+Mirrors reference Script 4: create iteration nodes, then for each Teams-sheet row set
 bug behavior / backlog iteration and POST every iteration onto the team.
 """
 
@@ -112,7 +112,7 @@ def apply_backlog(
     return stats
 
 
-# July Script 4: rename-from display names / known Agile behavior refs.
+# Reference Script 4: rename-from display names / known Agile behavior refs.
 KNOWN_BEHAVIOR_RENAMES = {
     "Epic": "Epics",
     "Feature": "Features",
@@ -317,7 +317,7 @@ def _configure_backlog_levels(
     stats: dict[str, Any],
     emit: Emit,
 ) -> dict[str, str]:
-    """Rename/create backlog behaviors from the Backlogs sheet (July Part 1)."""
+    """Rename/create backlog behaviors from the Backlogs sheet (reference Script 4 Part 1)."""
     existing = _list_behaviors(client, process_id)
     by_name, by_name_ci, by_ref = _behavior_indexes(existing)
 
@@ -513,7 +513,7 @@ def _assign_wits_to_backlogs(
     stats: dict[str, Any],
     emit: Emit,
 ) -> None:
-    """Assign each enabled WIT to its Backlog name behavior (July Part 2)."""
+    """Assign each enabled WIT to its Backlog name behavior (reference Script 4 Part 2)."""
     wit_refs = _wit_name_index(client, process_id)
     emit("backlog", f"Assigning WITs to backlog levels ({len(wit_refs) // 2} types in process)")
 
@@ -592,7 +592,7 @@ def _set_default_wits(
     stats: dict[str, Any],
     emit: Emit,
 ) -> None:
-    """Set Default work item type per Backlogs sheet row (July set_default_wits)."""
+    """Set Default work item type per Backlogs sheet row (reference set_default_wits)."""
     wit_refs = _wit_name_index(client, process_id)
 
     for backlog in ir["process"].get("backlogs") or []:
@@ -684,7 +684,7 @@ def _fetch_iteration_tree(
     emit: Emit,
 ) -> dict[str, Any] | None:
     """Load the project iteration classification tree (needs $depth for children + GUIDs)."""
-    # Try literal $depth first (July), then percent-encoded — some stacks mangle `$`.
+    # Try literal $depth first (reference scripts), then percent-encoded — some stacks mangle `$`.
     candidates = (
         "/_apis/wit/classificationnodes/Iterations?$depth=10",
         "/_apis/wit/classificationnodes/Iterations?%24depth=10",
@@ -951,7 +951,7 @@ def _enable_include_children(
     team_name: str,
     emit: Emit,
 ) -> None:
-    """July: when Include sub areas = Yes, set includeChildren on team area values."""
+    """When Include sub areas = Yes, set includeChildren on team area values."""
     current = client.get(
         "/_apis/work/teamsettings/teamfieldvalues",
         project=team_project,

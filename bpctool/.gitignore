@@ -16,6 +16,7 @@ runner/__pycache__/
 runner/**/__pycache__/
 runner/.pytest_cache/
 runner-out/
+bpctool.env
 
 # Editor directories and files
 .vscode/*

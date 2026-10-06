@@ -1,10 +1,9 @@
-from pathlib import Path
-
 from app.catalog_import import load_catalog_drafts
 from app.excel_ir import build_ir
 from app.mapping import build_mapping_from_ir
+from app.paths import bpc_files_root, resolve_release_folder
 
-CATALOG = Path("/Users/bill/BPC Files")
+CATALOG = resolve_release_folder(bpc_files_root()) or bpc_files_root()
 
 
 def test_catalog_drafts_preserve_markdown_by_default(template_path):

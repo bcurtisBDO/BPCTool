@@ -17,7 +17,13 @@ import {
   validateTargetNames,
   workbookApplyKey,
 } from './targetAssessment'
-import { buildRunnerJobBody, runRunnerJob } from './runnerApi'
+import { describeCatalogProgress } from './catalogProgress'
+import {
+  buildRunnerJobBody,
+  cancelRunnerJob,
+  pollRunnerJob,
+  runRunnerJob,
+} from './runnerApi'
 import {
   formatDurationMs,
   formatTimingSummary,
@@ -36,6 +42,16 @@ const SESSION_PROJECT = 'bpcSessionProject'
 const SESSION_PROJECT_DESCRIPTION = 'bpcSessionProjectDescription'
 const SESSION_PROCESS = 'bpcSessionProcess'
 const SESSION_EXECUTION_MODE = 'bpcSessionExecutionMode'
+const SESSION_ACTIVE_RUNNER_JOB = 'bpcActiveRunnerJob'
+
+const readActiveRunnerJob = () => {
+  try {
+    const saved = JSON.parse(readSession(SESSION_ACTIVE_RUNNER_JOB, 'null'))
+    return saved?.jobId ? saved : null
+  } catch {
+    return null
+  }
+}
 
 const loadJson = (key, fallbackValue) => {
   try {
@@ -160,11 +176,12 @@ function App() {
     return ['api', 'runner', 'simulate'].includes(stored) ? stored : 'runner'
   })
   const [templatePath, setTemplatePath] = useState('')
-  const [catalogSourceDir, setCatalogSourceDir] = useState('/Users/bill/BPC Files')
+  const [catalogSourceDir, setCatalogSourceDir] = useState('')
+  const [outputRoot, setOutputRoot] = useState('')
   const [pathPickerOpen, setPathPickerOpen] = useState(false)
   const [pathPickerMode, setPathPickerMode] = useState('file')
   const [pathPickerTarget, setPathPickerTarget] = useState('template')
-  const [workbookVersion, setWorkbookVersion] = useState('JUL-2026')
+  const [workbookVersion, setWorkbookVersion] = useState('')
   const [planResult, setPlanResult] = useState(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState('')
@@ -217,37 +234,62 @@ function App() {
   const [extensionMessage, setExtensionMessage] = useState('')
   const [extensionBusy, setExtensionBusy] = useState(false)
 
+  const [catalogProgress, setCatalogProgress] = useState(null)
+  const [cancelRequested, setCancelRequested] = useState(false)
+  const catalogProgressSummary = useMemo(
+    () => describeCatalogProgress(catalogProgress),
+    [catalogProgress],
+  )
+
   const isRunningRef = useRef(false)
   const abortControllerRef = useRef(null)
+  const activeJobIdRef = useRef(null)
+  const runnerJobStartingRef = useRef(false)
+  const pendingCancelRef = useRef(false)
 
   const rootAreaPath =
     rootAreaPathOverride ?? derivedRootAreaPath(projectName)
 
-  const loadRunnerDefaults = async () => {
+  const loadRunnerDefaults = async ({ onlyEmpty = false } = {}) => {
     try {
       const response = await fetch('/api/defaults')
       if (!response.ok) {
         throw new Error(`Runner defaults unavailable (${response.status})`)
       }
       const defaults = await response.json()
-      if (defaults.excel_file) {
+      if (defaults.output_root) {
+        setOutputRoot(defaults.output_root)
+      }
+      const fillTemplate = defaults.excel_file && !(onlyEmpty && templatePath.trim())
+      const fillCatalog =
+        defaults.catalog_source_dir && !(onlyEmpty && catalogSourceDir.trim())
+      if (fillTemplate) {
         setTemplatePath(defaults.excel_file)
       }
-      if (defaults.catalog_source_dir) {
+      if (fillCatalog) {
         setCatalogSourceDir(defaults.catalog_source_dir)
       }
-      if (defaults.excel_file || defaults.catalog_source_dir) {
+      if (defaults.release_label && !workbookVersion.trim()) {
+        setWorkbookVersion(defaults.release_label)
+      }
+      const release = defaults.release_label ? ` (release ${defaults.release_label})` : ''
+      if (defaults.excel_file && defaults.catalog_source_dir) {
+        setRunMessage(`Loaded template and catalog folder${release} from ${defaults.bpc_files_root}.`)
+      } else if (defaults.catalog_source_dir) {
         setRunMessage(
-          defaults.excel_file
-            ? 'Loaded template/catalog defaults from local runner.'
-            : 'Loaded catalog folder default. Set Template workbook path (Browse…) — the guideline .xlsx is not bundled.',
+          `Loaded catalog folder${release}. No "ADO template guideline*.xlsx" found there — set Template workbook path (Browse…).`,
         )
-      } else {
+      } else if (!onlyEmpty) {
         setRunMessage(
-          'No defaults found. Set Template workbook path and Catalog source folder (Browse…).',
+          defaults.bpc_files_root_exists === 'yes'
+            ? `No catalog workbooks found in ${defaults.bpc_files_root} or its release subfolders. Set paths with Browse….`
+            : `${defaults.bpc_files_root} does not exist. Create it with one subfolder per release (e.g. 2026-Q4), or set paths with Browse….`,
         )
       }
     } catch (error) {
+      if (onlyEmpty) {
+        return
+      }
       const message =
         error instanceof Error
           ? error.message
@@ -318,6 +360,18 @@ function App() {
   }, [orgUrl])
 
   const connectionReady = Boolean(effectiveOrgUrl && pat.trim())
+
+  const runButtonLabel =
+    executionMode !== 'runner'
+      ? 'Run selected flow'
+      : dryRun
+        ? 'Rehearse selected flow'
+        : 'Run selected flow (live)'
+  const liveTargetLabel = [
+    effectiveOrgUrl ? ` org ${effectiveOrgUrl}` : '',
+    processName.trim() ? ` · process “${processName.trim()}”` : '',
+    projectName.trim() ? ` · project “${projectName.trim()}”` : '',
+  ].join('')
 
   useEffect(() => {
     if (!connectionReady || executionMode === 'simulate') {
@@ -580,7 +634,7 @@ function App() {
   /**
    * Gate process / layout / project runs on Multivalue extension presence.
    * Prompts to install when missing; blocks if declined or install fails.
-   * Skipped for Simulate and Apply dry-run (no ADO mutations; matches runner).
+   * Skipped for Simulate and Rehearsal only (no ADO mutations; matches runner).
    */
   const ensureMultivalueExtensionForSetup = async () => {
     if (executionMode === 'simulate' || dryRun) {
@@ -759,9 +813,223 @@ function App() {
     }))
   }
 
-  const cancelWorkflow = () => {
-    abortControllerRef.current?.abort()
+  const cancelWorkflow = async () => {
+    const jobId = activeJobIdRef.current
+    if (!jobId && runnerJobStartingRef.current) {
+      // Job id not known yet; cancel on the runner as soon as it is created.
+      pendingCancelRef.current = true
+      setCancelRequested(true)
+      setRunMessage('Cancel requested — waiting for the runner job to start...')
+      return
+    }
+    if (!jobId) {
+      abortControllerRef.current?.abort()
+      return
+    }
+    setCancelRequested(true)
+    setRunMessage('Cancel requested — the runner stops after in-flight requests finish...')
+    try {
+      await cancelRunnerJob(jobId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Cancel request failed.'
+      addLog(`Cancel failed (${message}); stopped watching the job instead.`)
+      abortControllerRef.current?.abort()
+    }
   }
+
+  const beginRun = () => {
+    isRunningRef.current = true
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+    setIsRunning(true)
+    pendingCancelRef.current = false
+    setCancelRequested(false)
+    setCatalogProgress(null)
+    setRunLogs([])
+    setRunOverlay({ key: cacheKey, statuses: {} })
+    return abortController
+  }
+
+  const endRun = () => {
+    isRunningRef.current = false
+    abortControllerRef.current = null
+    activeJobIdRef.current = null
+    runnerJobStartingRef.current = false
+    pendingCancelRef.current = false
+    writeSession(SESSION_ACTIVE_RUNNER_JOB, '')
+    setIsRunning(false)
+    setCancelRequested(false)
+  }
+
+  const rememberRunnerJob = (jobId, context) => {
+    activeJobIdRef.current = jobId
+    runnerJobStartingRef.current = false
+    writeSession(SESSION_ACTIVE_RUNNER_JOB, JSON.stringify({ ...context, jobId }))
+    if (pendingCancelRef.current) {
+      pendingCancelRef.current = false
+      cancelRunnerJob(jobId).catch((error) => {
+        addLog(`Cancel failed: ${error instanceof Error ? error.message : error}`)
+      })
+    }
+  }
+
+  const dropRunningStatuses = (activeCacheKey) => {
+    setRunOverlay((current) => ({
+      key: activeCacheKey,
+      statuses:
+        current.key === activeCacheKey
+          ? Object.fromEntries(
+              Object.entries(current.statuses).filter(([, status]) => status !== 'running'),
+            )
+          : {},
+    }))
+  }
+
+  const handleRunnerEvent = (event, context, signal) => {
+    if (signal?.aborted) {
+      return
+    }
+    if (event.type === 'catalog-progress') {
+      setCatalogProgress(event)
+      return
+    }
+    const stepId = event.stepId
+    const message = event.message || event.type
+    if (event.type === 'cancel-requested') {
+      setCancelRequested(true)
+    }
+    if (event.type === 'step-started' && stepId) {
+      setStepStatus(stepId, 'running')
+    }
+    if (event.type === 'step-completed' && stepId) {
+      // Dry-run must not look like a live completion in the workflow cards.
+      setStepStatus(stepId, context.dryRun ? 'skipped' : 'completed')
+    }
+    if ((event.type === 'step-skipped' || event.type === 'step-cancelled') && stepId) {
+      setStepStatus(stepId, 'skipped')
+    }
+    if ((event.type === 'step-failed' || event.type === 'job-error') && stepId) {
+      setStepStatus(stepId, 'failed')
+    }
+    if (event.type === 'run-summary') {
+      addLog(message)
+      return
+    }
+    addLog(stepId ? `${stepId}: ${message}` : message)
+  }
+
+  const recordCompletedSteps = (activeCacheKey, stepIds) => {
+    if (!activeCacheKey || stepIds.length === 0) {
+      return
+    }
+    persistCompletionCache((previous) => ({
+      ...previous,
+      [activeCacheKey]: Array.from(
+        new Set([...migrateCompletedStepIds(previous[activeCacheKey] ?? []), ...stepIds]),
+      ),
+    }))
+  }
+
+  const finishRunnerJob = (job, context) => {
+    const activeCacheKey = buildCacheKey(
+      context.orgUrl,
+      context.processName,
+      context.projectName,
+    )
+    const applyOk = job.status === 'succeeded' && (job.apply_result?.ok ?? false)
+    const timings = job.apply_result?.timings || []
+    const totalMs = job.apply_result?.duration_ms ?? job.duration_ms ?? null
+    // run-summary event already logged when present; ensure a summary if missing.
+    if (!job.events?.some((event) => event.type === 'run-summary')) {
+      logRunTiming(timings, totalMs, { failed: !applyOk })
+    }
+    const timingNote = totalMs != null ? ` Total ${formatDurationMs(totalMs)}.` : ''
+    const finished = Object.keys(job.apply_result?.step_results || {})
+    const out = job.apply_result?.output_dir
+
+    if (applyOk) {
+      // Never mark steps complete / record workbook apply for dry-run —
+      // otherwise dependency-aware runs skip real work next time.
+      if (!context.dryRun) {
+        recordCompletedSteps(activeCacheKey, finished)
+        if (finished.includes('process') && job.result?.workbook_fingerprint) {
+          persistWorkbookApply({
+            fingerprint: job.result.workbook_fingerprint,
+            processName: context.processName,
+          })
+        }
+      }
+      setRunOverlay({ key: activeCacheKey, statuses: {} })
+      setRunMessage(
+        context.dryRun
+          ? `Rehearsal finished — no Azure DevOps changes were made${
+              out ? ` (preview files in ${out})` : ''
+            }.${timingNote} Uncheck “Rehearsal only” and run again for the live run.`
+          : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.${timingNote}`,
+      )
+      return
+    }
+
+    dropRunningStatuses(activeCacheKey)
+    if (job.status === 'cancelled') {
+      if (!context.dryRun) {
+        // A cancelled catalog is partial; its id-map lets the next run resume.
+        recordCompletedSteps(
+          activeCacheKey,
+          finished.filter((stepId) => stepId !== 'catalog'),
+        )
+      }
+      setRunMessage(
+        `Runner job cancelled.${timingNote} Run again to resume — Catalog Import continues from ado-id-map.csv.`,
+      )
+      addLog('Run cancelled by user.')
+      return
+    }
+    setRunMessage(`Runner job failed: ${job.error || 'unknown error'}.${timingNote}`)
+  }
+
+  const reattachRunnerJob = async (saved) => {
+    if (isRunningRef.current) {
+      return
+    }
+    const abortController = beginRun()
+    activeJobIdRef.current = saved.jobId
+    setRunMessage(`Reattaching to runner job ${saved.jobId} started before the page reloaded...`)
+    try {
+      const job = await pollRunnerJob(saved.jobId, {
+        signal: abortController.signal,
+        onEvent: (event) => handleRunnerEvent(event, saved, abortController.signal),
+      })
+      finishRunnerJob(job, saved)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected runner error.'
+      setRunMessage(
+        message.startsWith('Job not found')
+          ? 'The previous runner job is no longer available (the runner was restarted).'
+          : `Stopped watching runner job: ${message}`,
+      )
+    } finally {
+      endRun()
+    }
+  }
+
+  useEffect(() => {
+    const timer = setTimeout(() => loadRunnerDefaults({ onlyEmpty: true }), 0)
+    return () => clearTimeout(timer)
+    // Mount-only: prefill paths from the runner without overwriting user input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const saved = readActiveRunnerJob()
+    if (!saved) {
+      return undefined
+    }
+    const timer = setTimeout(() => reattachRunnerJob(saved), 0)
+    return () => clearTimeout(timer)
+    // Mount-only: resume watching a job that outlived a page reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const openPathPicker = (target, mode) => {
     setPathPickerTarget(target)
@@ -782,7 +1050,7 @@ function App() {
     setPlanLoading(true)
     setPlanError('')
     setPlanResult(null)
-    setRunMessage('Requesting dry-run plan from local runner...')
+    setRunMessage('Building plan preview from the workbooks (no Azure DevOps changes)...')
 
     try {
       const response = await fetch('/api/plan/dry-run', {
@@ -811,11 +1079,11 @@ function App() {
       setPlanResult(payload)
       setRunMessage(
         payload.ok
-          ? `Dry-run plan ready: ${payload.actions?.length ?? 0} actions from ${payload.summary?.counts?.catalog_rows ?? 0} catalog rows.`
-          : `Dry-run blocked: ${(payload.errors || []).join(' ')}`,
+          ? `Plan ready: ${payload.actions?.length ?? 0} actions from ${payload.summary?.counts?.catalog_rows ?? 0} catalog rows.`
+          : `Plan blocked: ${(payload.errors || []).join(' ')}`,
       )
       addLog(
-        `Runner dry-run: fingerprint ${payload.workbook_fingerprint}; steps ${
+        `Plan preview: fingerprint ${payload.workbook_fingerprint}; steps ${
           payload.steps?.map((step) => step.id).join(' → ') || 'none'
         }`,
       )
@@ -825,7 +1093,7 @@ function App() {
           ? error.message
           : 'Failed to reach local runner. Quit and relaunch Start BPCTool (or npm start).'
       setPlanError(message)
-      setRunMessage(`Dry-run failed: ${message}`)
+      setRunMessage(`Plan preview failed: ${message}`)
     } finally {
       setPlanLoading(false)
     }
@@ -851,17 +1119,11 @@ function App() {
       return
     }
 
-    isRunningRef.current = true
-    const abortController = new AbortController()
-    abortControllerRef.current = abortController
-
-    setIsRunning(true)
-    setRunLogs([])
-    setRunOverlay({ key: cacheKey, statuses: {} })
+    const abortController = beginRun()
     setRunMessage(
       executionMode === 'runner'
         ? dryRun
-          ? 'Running local runner apply dry-run (no ADO mutations)...'
+          ? 'Rehearsing selected flow (no Azure DevOps changes)...'
           : 'Running local runner apply against Azure DevOps...'
         : executionMode === 'api'
           ? 'Running flow (live Azure DevOps API reads)...'
@@ -897,13 +1159,20 @@ function App() {
       if (executionMode === 'runner') {
         if (dryRun) {
           addLog(
-            'Apply dry-run is ON — steps will report success without creating/updating anything in Azure DevOps. Uncheck it to apply for real.',
+            'Rehearsal only is ON — steps run and write preview files, but nothing is created or updated in Azure DevOps.',
           )
         } else {
           addLog('Live apply — runner will mutate Azure DevOps in the selected org.')
         }
 
         const plannedSteps = resolveTargetSteps(runMode, selectedWorkflowId, completedStepIds)
+        const jobContext = {
+          dryRun,
+          orgUrl: runConfig.orgUrl,
+          processName: runConfig.processName,
+          projectName: runConfig.projectName,
+        }
+        runnerJobStartingRef.current = true
         const job = await runRunnerJob(
           buildRunnerJobBody({
             orgUrl: runConfig.orgUrl,
@@ -928,82 +1197,11 @@ function App() {
           }),
           {
             signal: abortController.signal,
-            onEvent: (event) => {
-              if (abortController.signal.aborted) {
-                return
-              }
-              const stepId = event.stepId
-              const message = event.message || event.type
-              if (event.type === 'step-started' && stepId) {
-                setStepStatus(stepId, 'running')
-              }
-              if (event.type === 'step-completed' && stepId) {
-                // Dry-run must not look like a live completion in the workflow cards.
-                setStepStatus(stepId, dryRun ? 'skipped' : 'completed')
-              }
-              if (event.type === 'step-skipped' && stepId) {
-                setStepStatus(stepId, 'skipped')
-              }
-              if ((event.type === 'step-failed' || event.type === 'job-error') && stepId) {
-                setStepStatus(stepId, 'failed')
-              }
-              if (event.type === 'run-summary') {
-                addLog(message)
-                return
-              }
-              addLog(stepId ? `${stepId}: ${message}` : message)
-            },
+            onEvent: (event) => handleRunnerEvent(event, jobContext, abortController.signal),
+            onJobCreated: (jobId) => rememberRunnerJob(jobId, jobContext),
           },
         )
-
-        const activeCacheKey = buildCacheKey(
-          runConfig.orgUrl,
-          runConfig.processName,
-          runConfig.projectName,
-        )
-        const applyOk = job.status === 'succeeded' && (job.apply_result?.ok ?? false)
-        const timings = job.apply_result?.timings || []
-        const totalMs =
-          job.apply_result?.duration_ms ?? job.duration_ms ?? null
-        // run-summary event already logged when present; ensure a summary if missing.
-        if (!job.events?.some((event) => event.type === 'run-summary')) {
-          logRunTiming(timings, totalMs, { failed: !applyOk })
-        }
-        const timingNote =
-          totalMs != null ? ` Total ${formatDurationMs(totalMs)}.` : ''
-        if (applyOk) {
-          // Never mark steps complete / record workbook apply for dry-run —
-          // otherwise dependency-aware runs skip real work next time.
-          if (!dryRun) {
-            const finished = Object.keys(job.apply_result?.step_results || {})
-            const nextCompleted = Array.from(new Set([...completedStepIds, ...finished]))
-            if (activeCacheKey) {
-              persistCompletionCache((previous) => ({
-                ...previous,
-                [activeCacheKey]: nextCompleted,
-              }))
-            }
-            if (finished.includes('process') && job.result?.workbook_fingerprint) {
-              persistWorkbookApply({
-                fingerprint: job.result.workbook_fingerprint,
-                processName: runConfig.processName,
-              })
-            }
-          }
-          setRunOverlay({ key: activeCacheKey, statuses: {} })
-          const out = job.apply_result?.output_dir
-          setRunMessage(
-            dryRun
-              ? `Apply dry-run finished — no Azure DevOps changes were made${
-                  out ? ` (preview artifacts in ${out})` : ''
-                }.${timingNote} Uncheck “Apply dry-run” and run again to mutate the org.`
-              : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.${timingNote}`,
-          )
-        } else {
-          setRunMessage(
-            `Runner job failed: ${job.error || 'unknown error'}.${timingNote}`,
-          )
-        }
+        finishRunnerJob(job, jobContext)
       } else {
         const result = await runWorkflowFlow({
           mode: runMode,
@@ -1132,9 +1330,7 @@ function App() {
       setRunMessage(`Flow failed: ${message}`)
       addLog(`Runner error: ${message}`)
     } finally {
-      isRunningRef.current = false
-      abortControllerRef.current = null
-      setIsRunning(false)
+      endRun()
     }
   }
 
@@ -1440,9 +1636,9 @@ function App() {
               </button>
             </div>
             <small className="field-hint">
-              Absolute path to your ADO template guideline <code>.xlsx</code> (not bundled; not
-              the catalog folder). Use Browse… or Load runner defaults if the file sits in the
-              catalog folder.
+              Absolute path to the current release&apos;s ADO template guideline <code>.xlsx</code>{' '}
+              (not bundled). Keep it in the same release folder as the catalog workbooks so Load
+              runner defaults finds it.
             </small>
           </label>
           <label className="span-12">
@@ -1451,7 +1647,7 @@ function App() {
               <input
                 value={catalogSourceDir}
                 onChange={(event) => setCatalogSourceDir(event.target.value)}
-                placeholder="/Users/bill/BPC Files"
+                placeholder="/Users/you/BPC Files/2026-Q4"
                 disabled={isRunning}
               />
               <button
@@ -1464,9 +1660,17 @@ function App() {
               </button>
             </div>
             <small className="field-hint">
-              Absolute path to the folder of catalog workbooks (e.g.{' '}
-              <code>/Users/bill/BPC Files</code>).
+              One release folder, e.g. <code>~/BPC Files/2026-Q4</code>, holding that
+              quarter&apos;s template and catalog workbooks. Every catalog workbook in it is
+              imported, so do not mix releases.
             </small>
+            {outputRoot ? (
+              <small className="field-hint">
+                Run outputs: <code>{outputRoot}/&lt;org&gt;_&lt;project&gt;/</code>. Keep this
+                folder between runs and releases — <code>ado-id-map.csv</code> there is what
+                prevents duplicate catalog work items.
+              </small>
+            ) : null}
           </label>
           <label className="span-4">
             Workbook version / revision label
@@ -1476,12 +1680,12 @@ function App() {
                 setWorkbookVersion(event.target.value)
                 setConfirmProcessUpdate(false)
               }}
-              placeholder="e.g. 2026.08 or sprint-42"
+              placeholder="Quarterly release label, e.g. 2026-Q3"
               disabled={isRunning}
             />
           </label>
           <label className="span-2">
-            Threads
+            {executionMode === 'runner' ? 'Catalog workers' : 'Threads'}
             <input
               type="number"
               min="1"
@@ -1493,31 +1697,36 @@ function App() {
               disabled={isRunning}
             />
             <span className="field-hint">
-              Catalog Import parallel workers (Runner). Start with 2–8; 1 =
-              serial. Also used by Simulate/API layout stubs.
+              {executionMode === 'runner'
+                ? 'Parallel creates and parent-link checks for Catalog Import. Start with 2–8; 1 = serial.'
+                : 'Parallelism for Simulate/API layout stubs.'}
             </span>
           </label>
-          <label className="span-2">
-            Retry count
-            <input
-              type="number"
-              min="0"
-              max="5"
-              value={Number.isNaN(maxRetries) ? '' : maxRetries}
-              onChange={(event) =>
-                setMaxRetries(parseBoundedInt(event.target.value, Number.NaN))
-              }
-              disabled={isRunning}
-            />
-          </label>
-          <label className="span-4">
-            Layout worksheet name
-            <input
-              value={layoutSheet}
-              onChange={(event) => setLayoutSheet(event.target.value)}
-              disabled={isRunning}
-            />
-          </label>
+          {executionMode !== 'runner' ? (
+            <>
+              <label className="span-2">
+                Retry count
+                <input
+                  type="number"
+                  min="0"
+                  max="5"
+                  value={Number.isNaN(maxRetries) ? '' : maxRetries}
+                  onChange={(event) =>
+                    setMaxRetries(parseBoundedInt(event.target.value, Number.NaN))
+                  }
+                  disabled={isRunning}
+                />
+              </label>
+              <label className="span-4">
+                Layout worksheet name
+                <input
+                  value={layoutSheet}
+                  onChange={(event) => setLayoutSheet(event.target.value)}
+                  disabled={isRunning}
+                />
+              </label>
+            </>
+          ) : null}
           <label className="span-8">
             Root area path
             <input
@@ -1533,14 +1742,16 @@ function App() {
               sheet. Edit only to override.
             </small>
           </label>
-          <label className="span-4">
-            Backlog worksheet name
-            <input
-              value={backlogSheet}
-              onChange={(event) => setBacklogSheet(event.target.value)}
-              disabled={isRunning}
-            />
-          </label>
+          {executionMode !== 'runner' ? (
+            <label className="span-4">
+              Backlog worksheet name
+              <input
+                value={backlogSheet}
+                onChange={(event) => setBacklogSheet(event.target.value)}
+                disabled={isRunning}
+              />
+            </label>
+          ) : null}
           <div
             className={`stack-field span-6 ${executionMode === 'runner' && dryRun ? 'dry-run-warning' : ''}`}
           >
@@ -1552,14 +1763,14 @@ function App() {
                 disabled={isRunning}
               />
               {executionMode === 'runner'
-                ? 'Apply dry-run (no Azure DevOps changes)'
-                : 'Dry-run backlog configuration'}
+                ? 'Rehearsal only — run steps without changing Azure DevOps'
+                : 'Rehearsal only — backlog configuration'}
             </label>
             {executionMode === 'runner' ? (
               <small className="field-hint">
                 {dryRun
-                  ? 'Checked: Run will parse/plan only and mark steps without creating the process/layouts in your org. Uncheck to apply for real.'
-                  : 'Unchecked: Run will create/update process, layouts, and later steps in the connected Azure DevOps org.'}
+                  ? 'On: Rehearse selected flow runs every selected step and writes preview files (import-preview.csv, import-prevalidate.json, summary) but makes no Azure DevOps calls. Steps show Skipped.'
+                  : 'Off: Run selected flow (live) creates/updates the process, layouts, project, teams, backlog, and catalog in the connected org.'}
               </small>
             ) : null}
           </div>
@@ -1592,7 +1803,7 @@ function App() {
           <button
             type="button"
             className="run-button secondary"
-            onClick={loadRunnerDefaults}
+            onClick={() => loadRunnerDefaults()}
             disabled={isRunning || planLoading}
           >
             Load runner defaults
@@ -1604,12 +1815,12 @@ function App() {
             onClick={previewPlan}
             disabled={planLoading || isRunning || !connectionReady || !nameValidation.ok}
           >
-            {planLoading ? 'Building plan...' : 'Preview plan (dry-run)'}
+            {planLoading ? 'Building plan...' : 'Preview plan'}
           </button>
 
           <button
             type="button"
-            className="run-button"
+            className={`run-button ${executionMode === 'runner' && !dryRun ? 'live' : ''}`}
             onClick={runWorkflow}
             disabled={
               isRunning ||
@@ -1617,16 +1828,16 @@ function App() {
               !nameValidation.ok
             }
           >
-            {isRunning ? 'Running...' : 'Run selected flow'}
+            {isRunning ? 'Running...' : runButtonLabel}
           </button>
 
           <button
             type="button"
             className="run-button secondary"
             onClick={cancelWorkflow}
-            disabled={!isRunning}
+            disabled={!isRunning || cancelRequested}
           >
-            Cancel run
+            {cancelRequested ? 'Cancelling...' : 'Cancel run'}
           </button>
 
           <button
@@ -1639,11 +1850,19 @@ function App() {
           </button>
         </div>
 
+        {executionMode === 'runner' ? (
+          <p className={`run-mode-note ${dryRun ? 'rehearsal' : 'live'}`}>
+            {dryRun
+              ? 'Rehearsal: Azure DevOps will not be changed. Uncheck “Rehearsal only” for the live run.'
+              : `Live run: changes Azure DevOps${liveTargetLabel}. Preview plan never changes anything; tick “Rehearsal only” to test the steps first.`}
+          </p>
+        ) : null}
+
         {planError ? <p className="field-error">{planError}</p> : null}
 
         {planResult ? (
           <div className="plan-preview">
-            <h3>Dry-run plan</h3>
+            <h3>Plan preview</h3>
             <p className="field-hint">
               IR {planResult.ir_version} · fingerprint {planResult.workbook_fingerprint}
             </p>
@@ -1683,6 +1902,19 @@ function App() {
 
         <div className="run-log" role="status" aria-live="polite">
           <p>{runMessage}</p>
+          {catalogProgressSummary ? (
+            <div className="catalog-progress">
+              <div className="catalog-progress-label">
+                <strong>{catalogProgressSummary.label}</strong>
+                <span>{catalogProgressSummary.detail}</span>
+              </div>
+              <progress
+                max={catalogProgressSummary.total}
+                value={catalogProgressSummary.done}
+                aria-label={`${catalogProgressSummary.label} progress`}
+              />
+            </div>
+          ) : null}
           <pre>{runLogs.length > 0 ? runLogs.join('\n') : 'No execution logs yet.'}</pre>
         </div>
       </section>

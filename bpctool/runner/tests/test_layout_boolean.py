@@ -21,7 +21,7 @@ def test_boolean_wit_payload_uses_string_false():
     assert payload["visible"] is True
 
 
-def test_control_types_match_july():
+def test_control_types_match_reference_scripts():
     assert _control_type("Boolean") == "BooleanControl"
     assert _control_type("html") == "HtmlFieldControl"
     assert _control_type("String") == "Field"

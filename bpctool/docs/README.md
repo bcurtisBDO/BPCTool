@@ -2,8 +2,8 @@
 
 | Doc | Purpose |
 |-----|---------|
-| [workflow-and-july-comparison.md](./workflow-and-july-comparison.md) | Engine workflow, APIs per step, X vs H template matrix, Catalog parallel/resume/backfill, July scripts vs BPCTool (assessment 2026-08-11) |
+| [workflow-and-script-comparison.md](./workflow-and-script-comparison.md) | Engine workflow, quarterly releases, X vs H, Catalog parallel/resume/backfill, incremental re-runs & conflicts, Microsoft reference scripts vs BPCTool (assessment 2026-10-06) |
 | [images/](./images/) | UI screenshots used in the app README |
 | [reference/](./reference/) | Post-create process template snapshots |
 
-Canonical product docs also live at [`../README.md`](../README.md), [`../USER_GUIDE.md`](../USER_GUIDE.md), and [`../CHANGELOG.md`](../CHANGELOG.md). Those cover Catalog Threads/resume/backfill, Multivalue required, create-only catalog fields, and re-run semantics.
+Canonical product docs also live at [`../README.md`](../README.md), [`../USER_GUIDE.md`](../USER_GUIDE.md), and [`../CHANGELOG.md`](../CHANGELOG.md). Those cover Catalog workers/resume/backfill, cancel/reattach/progress, Multivalue required, create-only catalog fields, and re-run semantics.

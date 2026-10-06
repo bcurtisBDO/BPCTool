@@ -6,7 +6,7 @@
  * picked up. A stale process on :8787 is terminated first.
  */
 import { execSync, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +17,38 @@ const RUNNER_DIR = path.join(ROOT, 'runner')
 const HOST = '127.0.0.1'
 const PORT = 8787
 const HEALTH = `http://${HOST}:${PORT}/health`
+const ENV_FILE = path.join(ROOT, 'bpctool.env')
+
+/** BPCTOOL_* settings from bpctool.env; real environment variables win. */
+export function parseEnvFile(text) {
+  const values = {}
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq <= 0) continue
+    const key = line.slice(0, eq).trim()
+    if (!key.startsWith('BPCTOOL_')) continue
+    let value = line.slice(eq + 1).trim()
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
+      value = value.slice(1, -1)
+    }
+    if (value) values[key] = value
+  }
+  return values
+}
+
+function runnerEnv(logger = console) {
+  if (!existsSync(ENV_FILE)) {
+    return { ...process.env }
+  }
+  const fromFile = parseEnvFile(readFileSync(ENV_FILE, 'utf8'))
+  const keys = Object.keys(fromFile)
+  if (keys.length) {
+    logger.info?.(`[bpc-runner] Loaded ${keys.join(', ')} from bpctool.env`)
+  }
+  return { ...fromFile, ...process.env }
+}
 
 function resolveUvicorn() {
   const candidates = [
@@ -166,7 +198,7 @@ export function localRunnerPlugin() {
       {
         cwd: RUNNER_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: runnerEnv(logger),
       },
     )
     owned = true

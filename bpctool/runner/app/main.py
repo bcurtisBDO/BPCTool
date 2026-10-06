@@ -6,14 +6,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .excel_ir import build_ir
+from .excel_ir import build_ir, find_template_workbook
 from .fs_browser import list_directory, list_roots
-from .jobs import create_job, get_job, run_dry_run
+from .jobs import cancel_job, create_job, get_job, run_dry_run
 from .models import DryRunRequest, DryRunResponse, JobCreateRequest, JobStatusResponse
+from .paths import bpc_files_root, output_root, resolve_release_folder
 
 app = FastAPI(
     title="BPC Runner",
-    description="Local Excel→IR→plan→apply engine for BPCTool (no external July scripts)",
+    description="Local Excel→IR→plan→apply engine for BPCTool (no external Python scripts)",
     version="0.2.0",
 )
 
@@ -25,26 +26,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Template is user-supplied (not bundled). Optional discovery:
-# BPCTOOL_TEMPLATE, or same file name under the catalog folder.
-DEFAULT_CATALOG = Path(os.environ.get("BPCTOOL_CATALOG", "/Users/bill/BPC Files"))
-_TEMPLATE_NAMES = (
-    "ADO template guideline (July).xlsx",
-    "ADO template guideline.xlsx",
-)
-
-
-def _discover_template() -> Path | None:
+def _discover_template(release_folder: Path | None) -> Path | None:
     env = (os.environ.get("BPCTOOL_TEMPLATE") or "").strip()
     if env:
         path = Path(env).expanduser()
         return path if path.is_file() else None
-    if DEFAULT_CATALOG.is_dir():
-        for name in _TEMPLATE_NAMES:
-            candidate = DEFAULT_CATALOG / name
-            if candidate.is_file():
-                return candidate
-    return None
+    return find_template_workbook(release_folder) if release_folder else None
 
 
 @app.get("/health")
@@ -64,10 +51,16 @@ def health() -> dict[str, str]:
 
 @app.get("/defaults")
 def defaults() -> dict[str, str | None]:
-    template = _discover_template()
+    root = bpc_files_root()
+    release = resolve_release_folder(root)
+    template = _discover_template(release)
     return {
         "excel_file": str(template) if template else None,
-        "catalog_source_dir": str(DEFAULT_CATALOG) if DEFAULT_CATALOG.exists() else None,
+        "catalog_source_dir": str(release) if release else None,
+        "release_label": release.name if release and release != root else None,
+        "bpc_files_root": str(root),
+        "bpc_files_root_exists": "yes" if root.is_dir() else "no",
+        "output_root": str(output_root()),
     }
 
 
@@ -126,8 +119,19 @@ def post_job(request: JobCreateRequest) -> JobStatusResponse:
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
-def job_status(job_id: str) -> JobStatusResponse:
+def job_status(
+    job_id: str,
+    since: int = Query(0, ge=0, description="Return events from this index onward"),
+) -> JobStatusResponse:
     try:
-        return get_job(job_id)
+        return get_job(job_id, since=since)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+
+
+@app.post("/jobs/{job_id}/cancel", response_model=JobStatusResponse)
+def job_cancel(job_id: str) -> JobStatusResponse:
+    try:
+        return cancel_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc

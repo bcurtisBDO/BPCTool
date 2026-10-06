@@ -1,4 +1,4 @@
-"""Map catalog Excel headers → ADO field reference names (July-compatible)."""
+"""Map catalog Excel headers → ADO field reference names (reference-script compatible)."""
 
 from __future__ import annotations
 
@@ -87,7 +87,9 @@ class TemplateMapping:
     aliases: dict[str, str] = field(
         default_factory=lambda: {**SYSTEM_FIELD_ALIASES, **BUILT_IN_FIELD_ALIASES}
     )
+    # Labels on each WIT (matrix X or H); hidden_fields_by_wit holds the H subset.
     applicable_fields_by_wit: dict[str, set[str]] = field(default_factory=dict)
+    hidden_fields_by_wit: dict[str, set[str]] = field(default_factory=dict)
     html_field_refs: set[str] = field(default_factory=set)
 
     def field_ref_for_header(self, header: str) -> str | None:
@@ -145,8 +147,10 @@ def build_mapping_from_ir(ir: dict[str, Any]) -> TemplateMapping:
 
     for wit in ir.get("process", {}).get("work_item_types", []):
         name = normalize(wit.get("name"))
-        applicable = set(wit.get("applicable_field_labels") or [])
-        mapping.applicable_fields_by_wit[name] = {normalize(label) for label in applicable}
+        hidden = {normalize(label) for label in wit.get("hidden_field_labels") or []}
+        visible = {normalize(label) for label in wit.get("applicable_field_labels") or []}
+        mapping.applicable_fields_by_wit[name] = visible | hidden
+        mapping.hidden_fields_by_wit[name] = hidden
 
     # Always treat description as HTML for catalog import.
     mapping.html_field_refs.add("System.Description")
@@ -155,7 +159,7 @@ def build_mapping_from_ir(ir: dict[str, Any]) -> TemplateMapping:
 
 
 def load_wit_field_matrix(path: str) -> dict[str, list[str]]:
-    """Return {wit_name: [field labels marked X]} from Work item types sheet."""
+    """Return {wit_name: [field labels marked X]} from Work item types sheet (H excluded)."""
     from pathlib import Path
 
     rows = _sheet_rows(Path(path), "Work item types")

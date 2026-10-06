@@ -10,10 +10,13 @@ from typing import Any, Callable
 from ..ado_client import AdoClient
 from ..catalog_import import load_catalog_drafts
 from ..catalog_runtime import (
+    Progress,
+    ShouldCancel,
     backfill_parent_links,
     clamp_parallel_workers,
     import_drafts_parent_aware,
     load_id_map,
+    load_id_map_parents,
 )
 from ..catalog_validate import prevalidate_catalog_drafts, prevalidate_summary
 from ..mapping import build_mapping_from_ir
@@ -31,6 +34,8 @@ def apply_catalog(
     limit: int | None = None,
     convert_markdown_to_html: bool = False,
     parallel_workers: int | None = None,
+    progress: Progress | None = None,
+    should_cancel: ShouldCancel | None = None,
 ) -> dict[str, Any]:
     project = ir["targets"]["project_name"]
     catalog_dir = ir["source"].get("catalog_source_dir")
@@ -42,6 +47,7 @@ def apply_catalog(
         "failed": 0,
         "linked": 0,
         "missing_parent": 0,
+        "cancelled": 0,
         "backfill": {},
         "parallel_workers": workers,
         "prevalidate": {},
@@ -183,30 +189,42 @@ def apply_catalog(
         id_map_path=id_map_path,
         parallel_workers=workers,
         emit=emit,
+        progress=progress,
+        should_cancel=should_cancel,
     )
     stats.update(create_stats)
-
-    backfill_stats = backfill_parent_links(
-        client,
-        drafts,
-        id_map,
-        project=project,
-        output_dir=output_dir,
-        emit=emit,
-    )
-    stats["backfill"] = backfill_stats
-    # Count backfill links toward linked when create missed the relation.
-    stats["linked"] = int(stats.get("linked") or 0) + int(
-        backfill_stats.get("linked") or 0
-    )
-
     failures_path.write_text(json.dumps(failures, indent=2), encoding="utf-8")
     stats["id_map_path"] = str(id_map_path)
+
+    if should_cancel is not None and should_cancel():
+        emit("catalog", "Cancelled before parent-link backfill; re-run to resume and backfill")
+        stats["backfill"] = {"skipped": "cancelled"}
+    else:
+        backfill_stats = backfill_parent_links(
+            client,
+            drafts,
+            id_map,
+            project=project,
+            output_dir=output_dir,
+            emit=emit,
+            recorded_parents=load_id_map_parents(id_map_path),
+            parallel_workers=workers,
+            progress=progress,
+            should_cancel=should_cancel,
+        )
+        stats["backfill"] = backfill_stats
+        # Count backfill links toward linked when create missed the relation.
+        stats["linked"] = int(stats.get("linked") or 0) + int(
+            backfill_stats.get("linked") or 0
+        )
+
     emit(
         "catalog",
         f"Catalog import finished: created {stats['created']}, "
         f"skipped {stats['skipped']}, linked {stats['linked']}, "
-        f"missing parent {stats['missing_parent']}, failed {stats['failed']}, "
-        f"workers {workers}",
+        f"missing parent {stats['missing_parent']}, failed {stats['failed']}"
+        + (f", cancelled {stats['cancelled']}" if stats.get("cancelled") else "")
+        + (f", reconciled {stats['reconciled']}" if stats.get("reconciled") else "")
+        + f", workers {workers}",
     )
     return stats

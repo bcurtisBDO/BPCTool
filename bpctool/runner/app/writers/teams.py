@@ -1,4 +1,4 @@
-"""Upsert teams and area paths (July Script 3 semantics)."""
+"""Upsert teams and area paths (reference Script 3 semantics)."""
 
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ def apply_teams(
 
         relative = "\\".join(parts)
         entry = team_assignments[team_name]
-        # First row for a team becomes its default area (July track_team).
+        # First row for a team becomes its default area (reference track_team).
         if entry["default"] is None:
             entry["default"] = relative
         entry["paths"].add(relative)
@@ -218,7 +218,7 @@ def _assign_team_areas(
     default_relative: str,
     paths: set[str],
 ) -> None:
-    """July set_team_area: default + full values list, includeChildren=false."""
+    """Reference set_team_area: default + full values list, includeChildren=false."""
     default_formatted = _format_area_path(project, default_relative)
     values = [{"value": default_formatted, "includeChildren": False}]
     for path in sorted(paths):
