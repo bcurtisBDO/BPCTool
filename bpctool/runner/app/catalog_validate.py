@@ -33,6 +33,7 @@ REVIEW_KINDS = (
     "invalid_area_path",
     "invalid_state",
     "invalid_picklist_value",
+    "multiple_values_single_select",
     "text_truncated",
     "invalid_multi_select_token",
     "required_empty",
@@ -78,6 +79,15 @@ ISSUE_TEXT: dict[str, dict[str, str]] = {
         "label": "Value is not in the picklist",
         "outcome": "Value removed from this field.",
         "fix": "Correct the cell in the catalog workbook, or add the value to the template Picklists sheet.",
+    },
+    "multiple_values_single_select": {
+        "label": "Several values in a field the template marks single-select",
+        "outcome": "Value removed from this field — a single-select picklist accepts one value.",
+        "fix": (
+            "To keep all the values, set Multi-select field = Yes for this field in the template "
+            "Fields sheet, then re-run Process Template and Page Layout (adds the Multivalue control) "
+            "before Catalog Import. Otherwise keep one value in the catalog cell."
+        ),
     },
     "text_truncated": {
         "label": f"Text longer than {MAX_STRING_LENGTH} characters",
@@ -490,13 +500,28 @@ def prevalidate_catalog_drafts(
             else:
                 canon = allowed.get(text.casefold())
                 if canon is None:
-                    add(
-                        ref,
-                        text,
-                        "invalid_picklist_value",
-                        "sanitize" if sanitize else "report",
-                        f"Not in picklist '{meta['label']}'",
-                    )
+                    parts = split_multi_select(text)
+                    known_parts = [p for p in parts if p.casefold() in allowed]
+                    if len(parts) > 1 and known_parts:
+                        unknown_parts = [p for p in parts if p.casefold() not in allowed]
+                        detail = f"{len(parts)} values in single-select '{meta['label']}'"
+                        if unknown_parts:
+                            detail += f"; not in picklist: {', '.join(unknown_parts[:5])}"
+                        add(
+                            ref,
+                            text,
+                            "multiple_values_single_select",
+                            "sanitize" if sanitize else "report",
+                            detail,
+                        )
+                    else:
+                        add(
+                            ref,
+                            text,
+                            "invalid_picklist_value",
+                            "sanitize" if sanitize else "report",
+                            f"Not in picklist '{meta['label']}'",
+                        )
                     if sanitize:
                         del draft.fields[ref]
                         result.fields_stripped += 1

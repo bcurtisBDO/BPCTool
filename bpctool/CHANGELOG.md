@@ -16,6 +16,7 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 - Catalog **Iteration Path** gets the same project-prefix fix as Area Path (catalog workbooks ship `MSBPCProj`, which a differently named project rejects); values are only re-prefixed, never removed
 - Fix: TF401347 on **Iteration Path** was explained as an area-path problem in `import-failures.csv`; it now names the iteration path and its fix
 - Fix: template placeholder count no longer double-counts an area row whose path and default segment both changed
+- Data checks: a cell with several `;`-separated values in a field the template marks single-select (e.g. `Accounts payable; Warehouse management` in **Module**) is reported as *Several values in a field the template marks single-select*, with the fix (set **Multi-select field = Yes** in the template Fields sheet, re-run Process Template and Page Layout), instead of the misleading *Value is not in the picklist*
 - New run mode **Run from selected step onward**: runs the selected card and every later card, including completed ones (Process + Layout gate still applies)
 - Durations of an hour or more show as `1h 55m`
 - Removed wording that described BPCTool as part of a larger toolkit — it is a standalone app

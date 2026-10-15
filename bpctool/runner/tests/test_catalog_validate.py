@@ -190,6 +190,37 @@ def test_prevalidate_strips_invalid_single_picklist() -> None:
     assert result.counts.get("invalid_picklist_value") == 1
 
 
+def test_prevalidate_flags_several_values_in_single_select() -> None:
+    """Module is single-select in the template; 'A; B' gets its own explanation."""
+    drafts = [
+        WorkItemDraft(
+            key="s1",
+            parent_key=None,
+            work_item_type="Scenario",
+            title="Pay vendors",
+            fields={"MSBPC.module": "Accounts payable; General ledger"},
+            source_file="bpc.xlsx",
+            source_row=12,
+        ),
+        WorkItemDraft(
+            key="s2",
+            parent_key=None,
+            work_item_type="Scenario",
+            title="Typo",
+            fields={"MSBPC.module": "Acounts payable; General ledger"},
+            source_file="bpc.xlsx",
+            source_row=13,
+        ),
+    ]
+    result = prevalidate_catalog_drafts(drafts, _ir(), _mapping(), sanitize=True)
+    assert result.counts.get("multiple_values_single_select") == 2
+    assert result.counts.get("invalid_picklist_value") is None
+    assert "MSBPC.module" not in drafts[0].fields
+    details = [i.detail for i in result.issues]
+    assert "2 values in single-select 'Module'" in details
+    assert "2 values in single-select 'Module'; not in picklist: Acounts payable" in details
+
+
 def test_prevalidate_normalizes_picklist_casing() -> None:
     """Catalog title-case vs template sentence-case (Module)."""
     drafts = [

@@ -1,8 +1,9 @@
-# BPCTool
+# BPCTool - Simplifying Setup of Business Process Catalog Based ADO  Projects
 
-BPCTool sets up Azure DevOps for the Microsoft [Business Process Catalog](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops) from the Excel workbooks Microsoft publishes each quarter. It creates the inherited process, page layouts, project, teams and areas, backlog levels and iterations, then imports the catalog as linked work items.
+**BPCTool** simplifies the deployment of Microsoft's [Business Process Catalog (BPC)](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops) to Azure DevOps. Using Microsoft's quarterly BPC Excel workbooks, it automatically configures the required Azure DevOps process and project structure, including page layouts, teams, areas, backlog levels, and iterations, and then imports catalog content such as Deliverables and Objectives as linked work items.
 
-It is a standalone app: a React UI with a local runner (FastAPI) that starts automatically. Excel stays the authoring format — the runner reads the workbooks, shows a plan, and applies it through the Azure DevOps REST APIs. It does not run the Microsoft reference Python scripts, and it is not tied to one release: point it at the current quarter's files.
+BPCTool runs as a standalone application with a browser-based interface. Excel remains the source format, while BPCTool handles the deployment workflow: **read the workbooks, preview the planned changes, and apply them through the Azure DevOps REST APIs.**
+Because BPCTool is release-independent, it can be used with the latest Microsoft BPC workbooks as they become available.
 
 ![BPCTool at a glance: what you need, how you use it, and what you get](./bpctool/docs/images/bpctool-overview.svg)
 
@@ -19,6 +20,8 @@ It is a standalone app: a React UI with a local runner (FastAPI) that starts aut
 - [For developers](#for-developers)
 - [License](#license)
 
+
+
 ## Requirements
 
 - **Node.js 20+** and **Python 3.11+** on the machine that runs BPCTool.
@@ -26,9 +29,11 @@ It is a standalone app: a React UI with a local runner (FastAPI) that starts aut
 - The [Multivalue control (Microsoft DevLabs)](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) extension on the org — required for Multi-select fields and for the process / layout / project steps. The Connection panel checks for it and can install it when the PAT allows; otherwise an org admin installs it.
 - The current release's **ADO template guideline** `.xlsx` and catalog workbooks. They are **not** bundled.
 
+
+
 ## Install and launch
 
-The app lives in [`bpctool/`](./bpctool/).
+The app lives in `[bpctool/](./bpctool/)`.
 
 - **macOS:** double-click `bpctool/Start BPCTool.command`
 - **Windows:** double-click `bpctool/Start BPCTool.bat`
@@ -42,6 +47,8 @@ cd bpctool
 npm run setup   # once: node_modules + .venv
 npm start       # UI + auto-started runner (opens the browser)
 ```
+
+
 
 ## Using BPCTool
 
@@ -123,16 +130,20 @@ Every catalog workbook in the selected folder is imported, so don't mix releases
 6. **Catalog import** — every matching workbook in the catalog folder; parallel, resumable, with parent-link backfill
 7. **Report** — HTML/JSON summary
 
+
+
 ## Modes
 
 **Run modes** (Workflow selection):
 
-| Mode | Runs |
-|------|------|
-| **Selected step only** (default) | The selected card alone, even if already completed; no prerequisite check |
-| **Dependency-aware** | The selected card plus incomplete steps before it |
-| **Run from selected step onward** | The selected card and every later card, including completed ones |
-| **Full** | All incomplete steps in order |
+
+| Mode                              | Runs                                                                      |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| **Selected step only** (default)  | The selected card alone, even if already completed; no prerequisite check |
+| **Dependency-aware**              | The selected card plus incomplete steps before it                         |
+| **Run from selected step onward** | The selected card and every later card, including completed ones          |
+| **Full**                          | All incomplete steps in order                                             |
+
 
 Project and later steps wait until Process Template and Page Layout have completed (except in Selected step only).
 
@@ -144,34 +155,42 @@ Project and later steps wait until Process Template and Page Layout have complet
 
 Each run ends with a **results card** in the UI: a headline, a highlighted line for anything substituted (such as the project name), **What needs attention** with example rows and how to fix them, the steps, and buttons for the files. Files are written to `<Run output folder>/<org>_<project>/`:
 
-| File | What it is |
-|------|------------|
-| `bpc-ado-setup-summary.html` | Plain-language run report, rewritten after every live run (`rehearsal-summary.html` for Rehearsal only) |
-| `import-failures.csv` | Rows that failed, for Excel: **Fix this row** vs **Blocked by parent**, the problem, how to fix it, source file and row, value tried |
-| `import-prevalidate.csv` | Every catalog value changed or removed before import (automatic fix vs needs review) |
-| `ado-id-map.csv` | Catalog key → work item ID. Re-runs resume from it — keep it |
-| `backfill-links-report.csv` | Parent-link backfill statuses |
-| `import-preview.csv` | Sample of the catalog rows as they will be sent |
+
+| File                         | What it is                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `bpc-ado-setup-summary.html` | Plain-language run report, rewritten after every live run (`rehearsal-summary.html` for Rehearsal only)                              |
+| `import-failures.csv`        | Rows that failed, for Excel: **Fix this row** vs **Blocked by parent**, the problem, how to fix it, source file and row, value tried |
+| `import-prevalidate.csv`     | Every catalog value changed or removed before import (automatic fix vs needs review)                                                 |
+| `ado-id-map.csv`             | Catalog key → work item ID. Re-runs resume from it — keep it                                                                         |
+| `backfill-links-report.csv`  | Parent-link backfill statuses                                                                                                        |
+| `import-preview.csv`         | Sample of the catalog rows as they will be sent                                                                                      |
+
 
 JSON versions (`*-summary.json`, `import-failures.json`, `import-prevalidate.json`) carry the same data and a shared run ID. Catalog import is create-only for fields; a re-run skips items already in `ado-id-map.csv`. More: [USER_GUIDE §11 Outputs](./bpctool/USER_GUIDE.md#11-outputs-and-artifacts).
 
 ## How workbook data is handled
 
 - **Backlogs** sheet: renames/creates backlog levels, sets default work item types, assigns enabled types from **Work item types**. Disabled types stay disabled in Azure DevOps.
-- **Multi-select** fields (Application family, Products, Industries, …) use suggested picklists plus the Multivalue control, so values like `A; B` import.
+- **Multi-select** fields (Application family, Products, Industries, …) use suggested picklists plus the Multivalue control, so values like `A; B` import. Only fields with **Multi-select field = Yes** in the template Fields sheet get this; `A; B` in any other picklist field (e.g. **Module** in the July template) is removed and reported with that fix.
 - **Catalog hierarchy** follows the **Title 1..N** columns (the ADO CSV outline), not Process sequence ID.
 - **Data checks** before every catalog import (and in Preview plan): project name fixes for Area / Iteration Path, area paths / States / picklist values Azure DevOps would reject are removed, text over 255 characters is shortened, Fields-sheet defaults are applied, picklist casing is aligned. Each change is listed in `import-prevalidate.csv`.
 - **Rich text:** HTML from Excel is kept; Markdown is kept by default (sent with `multilineFieldsFormat=Markdown`) or converted with **Convert Markdown large-text fields to HTML**. An empty Description is omitted. Details: [USER_GUIDE §8](./bpctool/USER_GUIDE.md#8-rich-text-html-vs-markdown).
 - **Long runs:** catalog progress bar with ETA, **Cancel run** stops cleanly, and reloading the page reattaches to a running job.
 
+
+
 ## Documentation
 
-| Doc | Purpose |
-|-----|---------|
-| [USER_GUIDE](./bpctool/USER_GUIDE.md) | Full usage: install, every screen and option, Excel sheets, outputs, local API, troubleshooting |
-| [CHANGELOG](./bpctool/CHANGELOG.md) | Release history |
-| [Workflow & reference-script comparison](./bpctool/docs/workflow-and-script-comparison.md) | Engine steps, quarterly releases, X vs H field applicability, catalog parallel/resume/backfill, incremental re-runs, Microsoft reference scripts vs BPCTool |
-| [Process analysis (MSBPC snapshot)](./bpctool/docs/reference/MSBPC-process-analysis.md) | The process as created from one template release (43 WITs, generated 2026-08-09) — useful when comparing layouts, states, and fields; later releases may differ |
+
+| Doc                                                                                        | Purpose                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [USER_GUIDE](./bpctool/USER_GUIDE.md)                                                      | Full usage: install, every screen and option, Excel sheets, outputs, local API, troubleshooting                                                                 |
+| [CHANGELOG](./bpctool/CHANGELOG.md)                                                        | Release history                                                                                                                                                 |
+| [Workflow & reference-script comparison](./bpctool/docs/workflow-and-script-comparison.md) | Engine steps, quarterly releases, X vs H field applicability, catalog parallel/resume/backfill, incremental re-runs, Microsoft reference scripts vs BPCTool     |
+| [Process analysis (MSBPC snapshot)](./bpctool/docs/reference/MSBPC-process-analysis.md)    | The process as created from one template release (43 WITs, generated 2026-08-09) — useful when comparing layouts, states, and fields; later releases may differ |
+
+
+
 
 ## For developers
 
