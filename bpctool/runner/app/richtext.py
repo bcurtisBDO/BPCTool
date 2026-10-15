@@ -154,7 +154,7 @@ def normalize_rich_text(
 ) -> str:
     """Normalize Excel content for ADO large-text / HTML fields.
 
-    ADO Toolkit behavior:
+    Behavior:
     - Existing HTML is always preserved.
     - Markdown-like text is preserved by default (caller should also set
       /multilineFieldsFormat/{field}=Markdown on create).
@@ -179,7 +179,7 @@ def normalize_rich_text(
     if convert_markdown_to_html:
         return markdown_to_html(text)
 
-    # Default: keep markdown/plain text as authored (Toolkit preserve path).
+    # Default: keep markdown/plain text as authored.
     return text.strip()
 
 

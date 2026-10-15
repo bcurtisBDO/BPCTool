@@ -427,7 +427,7 @@ class AdoClient:
         markdown_format_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         patch: list[dict[str, Any]] = []
-        # ADO Toolkit preserve path: mark large-text fields as Markdown so they
+        # Preserve path: mark large-text fields as Markdown so they
         # render correctly instead of as plain text inside HTML controls.
         for ref in markdown_format_fields or []:
             if ref and fields.get(ref) not in (None, ""):

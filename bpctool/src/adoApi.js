@@ -1,5 +1,5 @@
 /**
- * Azure DevOps REST helpers (PAT Basic auth + retry), Toolkit-style.
+ * Azure DevOps REST helpers (PAT Basic auth + retry).
  * Browser calls go through the Vite `/ado-proxy` path to avoid CORS.
  */
 

@@ -8,7 +8,7 @@ import {
   installMultivalueExtension,
   stepsRequireMultivalueExtension,
 } from './adoApi'
-import { normalizeAdoOrgUrl } from './adoOrgUrl'
+import { normalizeAdoOrgUrl, parseAdoOrgUrl } from './adoOrgUrl'
 import CollapsibleSection from './CollapsibleSection'
 import ConnectionPanel from './ConnectionPanel'
 import PathPickerModal from './PathPickerModal'
@@ -18,6 +18,7 @@ import {
   workbookApplyKey,
 } from './targetAssessment'
 import { describeCatalogProgress } from './catalogProgress'
+import RunResultsCard, { DataChecks } from './RunResultsCard'
 import {
   buildRunnerJobBody,
   cancelRunnerJob,
@@ -43,6 +44,7 @@ const SESSION_PROJECT_DESCRIPTION = 'bpcSessionProjectDescription'
 const SESSION_PROCESS = 'bpcSessionProcess'
 const SESSION_EXECUTION_MODE = 'bpcSessionExecutionMode'
 const SESSION_ACTIVE_RUNNER_JOB = 'bpcActiveRunnerJob'
+const OUTPUT_ROOT_KEY = 'bpcOutputRoot'
 
 const readActiveRunnerJob = () => {
   try {
@@ -178,6 +180,14 @@ function App() {
   const [templatePath, setTemplatePath] = useState('')
   const [catalogSourceDir, setCatalogSourceDir] = useState('')
   const [outputRoot, setOutputRoot] = useState('')
+  // Empty = runner default (BPCTOOL_OUTPUT_DIR or bpctool/runner-out).
+  const [outputRootChoice, setOutputRootChoiceState] = useState(() => {
+    try {
+      return localStorage.getItem(OUTPUT_ROOT_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
   const [pathPickerOpen, setPathPickerOpen] = useState(false)
   const [pathPickerMode, setPathPickerMode] = useState('file')
   const [pathPickerTarget, setPathPickerTarget] = useState('template')
@@ -235,6 +245,7 @@ function App() {
   const [extensionBusy, setExtensionBusy] = useState(false)
 
   const [catalogProgress, setCatalogProgress] = useState(null)
+  const [runOutcome, setRunOutcome] = useState(null)
   const [cancelRequested, setCancelRequested] = useState(false)
   const catalogProgressSummary = useMemo(
     () => describeCatalogProgress(catalogProgress),
@@ -246,6 +257,39 @@ function App() {
   const activeJobIdRef = useRef(null)
   const runnerJobStartingRef = useRef(false)
   const pendingCancelRef = useRef(false)
+
+  const setOutputRootChoice = (value) => {
+    setOutputRootChoiceState(value)
+    try {
+      if (value.trim()) {
+        localStorage.setItem(OUTPUT_ROOT_KEY, value.trim())
+      } else {
+        localStorage.removeItem(OUTPUT_ROOT_KEY)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const outputFolderName = useMemo(() => {
+    const parsed = parseAdoOrgUrl(orgUrl)
+    const project = projectName.trim()
+    if (!parsed.ok || !project) {
+      return '<org>_<project>'
+    }
+    // Same rule as the runner's default_output_dir.
+    const slug = `${parsed.org}_${project}`
+      .replace(/[^A-Za-z0-9._-]+/g, '_')
+      .replace(/^[._-]+|[._-]+$/g, '')
+    return slug || 'ado'
+  }, [orgUrl, projectName])
+
+  const pathPickerInitial =
+    pathPickerTarget === 'catalog'
+      ? catalogSourceDir
+      : pathPickerTarget === 'output'
+        ? outputRootChoice || outputRoot
+        : templatePath
 
   const rootAreaPath =
     rootAreaPathOverride ?? derivedRootAreaPath(projectName)
@@ -513,7 +557,9 @@ function App() {
       ? 'Full flow'
       : runMode === 'step'
         ? 'Selected step only'
-        : 'Dependency-aware'
+        : runMode === 'from'
+          ? 'From selected step onward'
+          : 'Dependency-aware'
 
   const runPlanLabel = useMemo(() => {
     if (plannedStepIds.length === 0) {
@@ -522,6 +568,9 @@ function App() {
       }
       if (runMode === 'step') {
         return 'Will run: nothing (select a workflow card).'
+      }
+      if (runMode === 'from') {
+        return 'Will run: nothing — Process Template and Page Layout must complete before later steps. Start from Process Template or Page Layout, or use “Selected step only”.'
       }
       return 'Will run: nothing new (selected flow already completed for this org/project). Use “Selected step only” to re-run a completed card.'
     }
@@ -535,8 +584,16 @@ function App() {
       return `Will re-run only: ${titles[0]} (no prerequisite steps)`
     }
 
+    if (runMode === 'from') {
+      const selectedIndex = workflowDefinitions.findIndex((step) => step.id === selectedWorkflowId)
+      const heldBack = workflowDefinitions.length - selectedIndex - plannedStepIds.length
+      if (heldBack > 0) {
+        return `Will run: ${titles.join(' → ')}. The ${heldBack} later step(s) wait until Process Template and Page Layout have completed — start from Process Template, or run them afterwards.`
+      }
+    }
+
     return `Will run: ${titles.join(' → ')}`
-  }, [plannedStepIds, runMode])
+  }, [plannedStepIds, runMode, selectedWorkflowId])
 
   const persistCompletionCache = (updater) => {
     setCompletionCache((previous) => {
@@ -845,6 +902,7 @@ function App() {
     pendingCancelRef.current = false
     setCancelRequested(false)
     setCatalogProgress(null)
+    setRunOutcome(null)
     setRunLogs([])
     setRunOverlay({ key: cacheKey, statuses: {} })
     return abortController
@@ -945,7 +1003,9 @@ function App() {
     }
     const timingNote = totalMs != null ? ` Total ${formatDurationMs(totalMs)}.` : ''
     const finished = Object.keys(job.apply_result?.step_results || {})
-    const out = job.apply_result?.output_dir
+    const outcome = job.apply_result?.outcome ?? null
+    setRunOutcome(outcome)
+    const resultsNote = outcome ? ' See the results below.' : ''
 
     if (applyOk) {
       // Never mark steps complete / record workbook apply for dry-run —
@@ -962,10 +1022,8 @@ function App() {
       setRunOverlay({ key: activeCacheKey, statuses: {} })
       setRunMessage(
         context.dryRun
-          ? `Rehearsal finished — no Azure DevOps changes were made${
-              out ? ` (preview files in ${out})` : ''
-            }.${timingNote} Uncheck “Rehearsal only” and run again for the live run.`
-          : `Runner apply succeeded${out ? ` — artifacts in ${out}` : ''}.${timingNote}`,
+          ? `Rehearsal finished — no Azure DevOps changes were made.${timingNote}${resultsNote} Uncheck “Rehearsal only” and run again for the live run.`
+          : `${outcome?.headline ?? 'Run finished'}.${timingNote}${resultsNote}`,
       )
       return
     }
@@ -985,7 +1043,16 @@ function App() {
       addLog('Run cancelled by user.')
       return
     }
-    setRunMessage(`Runner job failed: ${job.error || 'unknown error'}.${timingNote}`)
+    setRunMessage(`Runner job failed: ${job.error || 'unknown error'}.${timingNote}${resultsNote}`)
+  }
+
+  const setUpCatalogRerun = () => {
+    setSelectedWorkflowId('catalog')
+    setRunMode('step')
+    setDryRun(false)
+    setRunMessage(
+      'Catalog Import is selected with “Selected step only”. Fix the rows listed in the results, then click Run selected flow (live) — items already imported are skipped.',
+    )
   }
 
   const reattachRunnerJob = async (saved) => {
@@ -1194,6 +1261,7 @@ function App() {
             steps: plannedSteps.length ? plannedSteps : null,
             convertMarkdownToHtml,
             catalogParallelWorkers: parseBoundedInt(threads, 4),
+            outputRoot: outputRootChoice,
           }),
           {
             signal: abortController.signal,
@@ -1549,6 +1617,15 @@ function App() {
           <label className="radio-row">
             <input
               type="radio"
+              checked={runMode === 'from'}
+              onChange={() => setRunMode('from')}
+              disabled={isRunning}
+            />
+            Run from selected step onward (re-runs completed steps)
+          </label>
+          <label className="radio-row">
+            <input
+              type="radio"
               checked={runMode === 'full'}
               onChange={() => setRunMode('full')}
               disabled={isRunning}
@@ -1578,7 +1655,9 @@ function App() {
                 key={workflow.id}
                 type="button"
                 className={`workflow-card ${cardActive ? 'active' : ''} ${
-                  (runMode === 'full' || runMode === 'step') && isPlanned ? 'planned' : ''
+                  (runMode === 'full' || runMode === 'step' || runMode === 'from') && isPlanned
+                    ? 'planned'
+                    : ''
                 }`}
                 onClick={() => {
                   if (runMode === 'full') {
@@ -1605,6 +1684,11 @@ function App() {
                 ) : null}
                 {runMode === 'full' && isPlanned ? (
                   <small className="plan-hint">In this run</small>
+                ) : null}
+                {runMode === 'from' && isPlanned ? (
+                  <small className="plan-hint">
+                    {workflow.id === selectedWorkflowId ? 'Starts here' : 'In this run'}
+                  </small>
                 ) : null}
               </button>
             )
@@ -1664,13 +1748,45 @@ function App() {
               quarter&apos;s template and catalog workbooks. Every catalog workbook in it is
               imported, so do not mix releases.
             </small>
-            {outputRoot ? (
-              <small className="field-hint">
-                Run outputs: <code>{outputRoot}/&lt;org&gt;_&lt;project&gt;/</code>. Keep this
-                folder between runs and releases — <code>ado-id-map.csv</code> there is what
-                prevents duplicate catalog work items.
-              </small>
-            ) : null}
+          </label>
+          <label className="span-12">
+            Run output folder
+            <div className="path-picker-row">
+              <input
+                value={outputRootChoice}
+                onChange={(event) => setOutputRootChoice(event.target.value)}
+                placeholder={outputRoot || 'Runner default (bpctool/runner-out)'}
+                disabled={isRunning}
+              />
+              <button
+                type="button"
+                className="secondary-inline"
+                onClick={() => openPathPicker('output', 'folder')}
+                disabled={isRunning}
+              >
+                Browse…
+              </button>
+              {outputRootChoice ? (
+                <button
+                  type="button"
+                  className="secondary-inline"
+                  onClick={() => setOutputRootChoice('')}
+                  disabled={isRunning}
+                >
+                  Use default
+                </button>
+              ) : null}
+            </div>
+            <small className="field-hint">
+              Each run writes to{' '}
+              <code>
+                {(outputRootChoice.trim() || outputRoot || 'runner-out').replace(/[/\\]+$/, '')}/
+                {outputFolderName}/
+              </code>
+              . Keep this folder between runs and releases — <code>ado-id-map.csv</code> there is
+              what prevents duplicate catalog work items. If you change folders, move the existing{' '}
+              <code>&lt;org&gt;_&lt;project&gt;</code> folder too.
+            </small>
           </label>
           <label className="span-4">
             Workbook version / revision label
@@ -1769,7 +1885,7 @@ function App() {
             {executionMode === 'runner' ? (
               <small className="field-hint">
                 {dryRun
-                  ? 'On: Rehearse selected flow runs every selected step and writes preview files (import-preview.csv, import-prevalidate.json, summary) but makes no Azure DevOps calls. Steps show Skipped.'
+                  ? 'On: Rehearse selected flow runs every selected step and writes preview files (rehearsal-summary.html, import-prevalidate.csv, import-preview.csv) but makes no Azure DevOps calls. Steps show Skipped.'
                   : 'Off: Run selected flow (live) creates/updates the process, layouts, project, teams, backlog, and catalog in the connected org.'}
               </small>
             ) : null}
@@ -1785,7 +1901,7 @@ function App() {
               Convert Markdown large-text fields to HTML
             </label>
             <small className="field-hint">
-              Default preserves markdown (ADO Toolkit style) and sets
+              Default preserves markdown and sets
               multilineFieldsFormat=Markdown. Enable only to store HTML instead.
             </small>
           </div>
@@ -1873,6 +1989,11 @@ function App() {
               {planResult.summary?.counts?.area_paths ?? 0} areas,{' '}
               {planResult.summary?.counts?.catalog_rows ?? 0} catalog rows
             </p>
+            {(planResult.notices || []).map((notice) => (
+              <p key={notice} className="run-notice">
+                {notice}
+              </p>
+            ))}
             <ol className="plan-step-list">
               {(planResult.steps || []).map((step) => (
                 <li key={step.id}>
@@ -1897,8 +2018,15 @@ function App() {
                 ))}
               </ul>
             ) : null}
+            <DataChecks checks={planResult.data_checks} />
           </div>
         ) : null}
+
+        <RunResultsCard
+          outcome={runOutcome}
+          onRerunCatalog={setUpCatalogRerun}
+          onDismiss={() => setRunOutcome(null)}
+        />
 
         <div className="run-log" role="status" aria-live="polite">
           <p>{runMessage}</p>
@@ -1921,20 +2049,22 @@ function App() {
 
       {pathPickerOpen ? (
         <PathPickerModal
-          key={`${pathPickerTarget}:${pathPickerMode}:${pathPickerTarget === 'template' ? templatePath : catalogSourceDir}`}
+          key={`${pathPickerTarget}:${pathPickerMode}:${pathPickerInitial}`}
           title={
             pathPickerTarget === 'catalog'
               ? 'Select catalog source folder'
-              : 'Select template workbook (.xlsx)'
+              : pathPickerTarget === 'output'
+                ? 'Select run output folder'
+                : 'Select template workbook (.xlsx)'
           }
           mode={pathPickerMode}
-          initialValue={
-            pathPickerTarget === 'catalog' ? catalogSourceDir : templatePath
-          }
+          initialValue={pathPickerInitial}
           onClose={() => setPathPickerOpen(false)}
           onConfirm={(nextPath) => {
             if (pathPickerTarget === 'catalog') {
               setCatalogSourceDir(nextPath)
+            } else if (pathPickerTarget === 'output') {
+              setOutputRootChoice(nextPath)
             } else {
               setTemplatePath(nextPath)
               setConfirmProcessUpdate(false)

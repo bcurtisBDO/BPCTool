@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .excel_ir import build_ir, find_template_workbook
 from .fs_browser import list_directory, list_roots
 from .jobs import cancel_job, create_job, get_job, run_dry_run
 from .models import DryRunRequest, DryRunResponse, JobCreateRequest, JobStatusResponse
 from .paths import bpc_files_root, output_root, resolve_release_folder
+from .run_outcome import OUTPUT_FILES
 
 app = FastAPI(
     title="BPC Runner",
@@ -108,6 +111,28 @@ def parse_ir(request: DryRunRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/outputs/{folder}/{name}")
+def output_file(
+    folder: str,
+    name: str,
+    root: Annotated[str | None, Query(description="Run output folder chosen in the UI")] = None,
+) -> FileResponse:
+    """Serve a known run output (report, failures, data checks) from the output root."""
+    if name not in OUTPUT_FILES or "/" in folder or "\\" in folder or folder.startswith("."):
+        raise HTTPException(status_code=404, detail="Unknown output file")
+    custom = Path(root).expanduser() if (root or "").strip() else None
+    if custom is not None and not custom.is_absolute():
+        raise HTTPException(status_code=400, detail="root must be an absolute path")
+    base = (custom or output_root()).resolve()
+    path = (base / folder / name).resolve()
+    if path.parent.parent != base or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"{name} has not been written yet")
+    if name.endswith(".html"):
+        return FileResponse(path, media_type="text/html; charset=utf-8")
+    media = "text/csv; charset=utf-8" if name.endswith(".csv") else "application/json"
+    return FileResponse(path, media_type=media, filename=f"{folder}-{name}")
 
 
 @app.post("/jobs", response_model=JobStatusResponse)

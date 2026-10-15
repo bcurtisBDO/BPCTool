@@ -364,7 +364,7 @@ def import_drafts_parent_aware(
         emit(
             "catalog",
             f"{stats['outcome_unknown']} create(s) had a network error with unknown outcome "
-            "and could not be reconciled — check import-failures.json before re-running.",
+            "and could not be reconciled — check import-failures.csv before re-running.",
         )
     return id_map, failures, stats
 

@@ -2,7 +2,9 @@
 
 This guide covers requirements, installation, step-by-step usage, architecture, API, and troubleshooting for the Business Process Catalog (BPC) Azure DevOps setup tool.
 
-For a short overview, see [README.md](./README.md). For release history, see [CHANGELOG.md](./CHANGELOG.md).
+For a short overview, see the [README](../README.md). For release history, see [CHANGELOG.md](./CHANGELOG.md).
+
+![BPCTool at a glance: what you need, the seven steps, and what you get](./docs/images/bpctool-overview.svg)
 
 ---
 
@@ -16,7 +18,7 @@ BPCTool configures an Azure DevOps organization for the Microsoft Business Proce
 4. Upsert **teams** and **area paths** (including multi-path team assignments)
 5. Configure **backlog levels**, **WIT→backlog mapping**, **iteration paths**, and **team iteration settings**
 6. **Import catalog** content — every matching workbook in the catalog folder (Business Process Catalog, Deliverables, Objectives, SbD Delivery Plan, etc.), not only the BPC file
-7. Emit an **HTML/JSON summary report**
+7. Emit an **HTML/JSON summary report** — also written automatically at the end of every run, and shown in the UI as a **results card**
 
 Excel remains the authoring format. A local FastAPI runner parses workbooks into an intermediate representation (IR), builds a plan, and applies changes through Azure DevOps REST APIs.
 
@@ -72,7 +74,7 @@ Microsoft ships a new template + catalog set each quarter. Keep each release in 
   _runner-out/                                optional BPCTOOL_OUTPUT_DIR (see below)
       <org>_<project>/
         ado-id-map.csv                        KEEP — prevents duplicate catalog items
-        import-failures.json, backfill-links-report.csv, …
+        bpc-ado-setup-summary.html, import-failures.csv, …
 ```
 
 | Rule | Why |
@@ -90,7 +92,7 @@ Microsoft ships a new template + catalog set each quarter. Keep each release in 
 3. Otherwise the newest release subfolder is used, and its folder name pre-fills **Workbook version** if that is blank.
 4. Template = `BPCTOOL_TEMPLATE`, else the newest `ADO template guideline*.xlsx` in the release folder.
 
-**Run outputs** go to `bpctool/runner-out/<org>_<project>/` by default (shown under Catalog source folder in the UI). Because that is inside the app folder, replacing the app folder during an upgrade deletes it. Either copy `runner-out/` across when upgrading, or set `BPCTOOL_OUTPUT_DIR` to a folder outside the app (e.g. `~/BPC Files/_runner-out`). Move existing `<org>_<project>/` folders there when you switch.
+**Run outputs** go to `<run output folder>/<org>_<project>/`. Pick the folder in **Run configuration → Run output folder** (Browse…; remembered in this browser). Left empty, it uses `BPCTOOL_OUTPUT_DIR`, else `bpctool/runner-out`. Because `runner-out` is inside the app folder, replacing the app folder during an upgrade deletes it — choose a folder outside the app (e.g. `~/BPC Files/_runner-out`), or copy `runner-out/` across when upgrading. When you switch folders, move existing `<org>_<project>/` folders with you: `ado-id-map.csv` in there is what stops a Catalog re-run from creating duplicates.
 
 **Setting the folder variables:** copy `bpctool/bpctool.env.example` to `bpctool/bpctool.env` and uncomment `BPCTOOL_CATALOG`, `BPCTOOL_TEMPLATE`, or `BPCTOOL_OUTPUT_DIR`. The launcher reads it on start (double-click launchers included); real environment variables take precedence. Restart BPCTool after editing.
 
@@ -168,7 +170,7 @@ Two controls never change Azure DevOps; they differ in how far they go:
 |---|---|---|---|
 | What runs | Reads the workbooks once and builds the plan; no step code runs | Every selected step runs and logs what it *would* do (`[dry-run] …` lines) | Every selected step runs for real |
 | Azure DevOps | Not contacted | Not contacted (the runner creates no ADO client) | Created / updated |
-| Output | On-screen plan: step order, counts, warnings, errors | Event log + preview files in the output folder (`import-preview.csv`, `import-prevalidate.json`, summary HTML/JSON) | Work items, process, project, … + all artifacts incl. `ado-id-map.csv` |
+| Output | On-screen plan: step order, counts, warnings, errors | Event log + results card + preview files in the output folder (`rehearsal-summary.html`, `import-prevalidate.csv`, `import-preview.csv`) | Work items, process, project, … + all artifacts incl. `ado-id-map.csv` |
 | Workflow cards | Unchanged | Shown **Skipped**; never marked complete | Marked **Completed** / **Failed** |
 | Use it to | Check inputs — paths, names, release folders, mixed-release warnings | Check catalog cleanup (picklist fixes, stripped area paths, defaults) before a long import | Apply |
 
@@ -225,9 +227,10 @@ These populate inventory used for create-vs-update policy.
 |------|----------|
 | **Selected step only** | Re-runs just the selected card; no prerequisite gating (useful to fix backlog/teams alone) |
 | **Dependency-aware** | Runs through the selected card and its incomplete prerequisites |
+| **Run from selected step onward** | Runs the selected card and every card after it, **including completed ones** — e.g. after a template change, start at Page Layout to redo Layout → Project → Teams → Backlog → Catalog → Report. Project and later cards still need Process + Layout completed (or included in the run) |
 | **Full** | Runs all incomplete steps in engine order |
 
-3. Select a workflow card when using Selected step only or Dependency-aware
+3. Select a workflow card when using Selected step only, Dependency-aware, or Run from selected step onward (the selected card shows **Starts here**)
 
 ### Step 4 — Run configuration
 
@@ -238,9 +241,12 @@ These populate inventory used for create-vs-update policy.
    - **Catalog source folder** — absolute path to the folder of catalog workbooks for the same release (BPC, Deliverables, Objectives, SbD, …)
    - **Workbook version / revision label** — the release label, e.g. `2026-Q3` (blank by default; used in fingerprinting)
 4. Set options:
-   - **Rehearsal only — run steps without changing Azure DevOps** — leave **unchecked** for the live run (default). Tick it only to rehearse; the run button then reads **Rehearse selected flow** and the catalog step still writes `import-preview.csv` and `import-prevalidate.json`.
+   - **Rehearsal only — run steps without changing Azure DevOps** — leave **unchecked** for the live run (default). Tick it only to rehearse; the run button then reads **Rehearse selected flow** and the catalog step still writes `import-preview.csv` and `import-prevalidate.csv` / `.json`, and the run writes `rehearsal-summary.html`.
    - **Convert Markdown large-text fields to HTML** — leave **unchecked** unless you want HTML conversion (see §8)
 5. **Root area path** defaults to the **project name** (project root); override only if needed. Area path *children* still come from the Excel Area paths sheet.
+6. **Run output folder** — where run results go (`<folder>/<org>_<project>/`). Leave empty for the default; keep the same folder for every run against a project.
+
+**"Your Project Name Here" placeholder:** wherever a workbook's area or iteration path contains `Your Project Name Here` (any casing, optionally in `<…>` / `[…]`), BPCTool substitutes the **Project name** from the form — in the template's Area paths, Iteration paths and Teams *Backlog iteration*, and in catalog rows' **Area Path** / **Iteration Path**. Every substitution is reported in a highlighted line — *Project name applied: 'Your Project Name Here' → '<project>' in N template area/iteration rows and M catalog Area/Iteration Path values* — in Preview plan, the run log, the results card, and the HTML report; each catalog value is also a row in `import-prevalidate.csv` (value in spreadsheet → value used).
 
 ### Step 5 — Preview plan (safe)
 
@@ -248,8 +254,12 @@ These populate inventory used for create-vs-update policy.
 2. Review:
    - Step order: `process → layout → project → teams → backlog → catalog → report`
    - Counts (enabled WITs, disabled WITs, fields, HTML fields, teams, backlogs, catalog rows, etc.)
+   - The highlighted **Project name applied …** line, if the workbooks contain `Your Project Name Here`
    - Warnings/errors
-3. Fix any blocking errors (missing sheets, confirmation required, etc.) before running
+   - **Catalog data checks** (when Catalog Import is selected): values that will be removed or shortened, with example file / row / value and how to fix each, plus a collapsed list of automatic fixes
+3. Fix any blocking errors (missing sheets, confirmation required, etc.) before running. Data-check items don't block a run, but fixing them in the workbook avoids changed or dropped values
+
+![Preview plan with the project-name line and Catalog data checks](./docs/images/ui-preview-plan.png)
 
 ### Step 6 — Live apply
 
@@ -259,13 +269,15 @@ These populate inventory used for create-vs-update policy.
 4. Click **Run selected flow (live)**
 5. Watch the event log for real ADO progress (not `[dry-run] Would ensure…` messages). During Catalog Import a progress bar shows done/total, created/skipped/failed, and an estimated time remaining (then the same for parent-link backfill)
 6. At the end of the run, the log includes **Run timing** with per-step durations and a **total**
-7. On success, open artifacts under `bpctool/runner-out/<org>_<project>/`
+7. When it finishes (success or not), the **results card** under the log shows the headline, what needs attention, and buttons for the report and CSVs; files are under `<Run output folder>/<org>_<project>/` (§11)
+
+![Results card after a rehearsal: headline, project-name line, report and data-check buttons, what needs attention](./docs/images/ui-results-card.png)
 
 If **Rehearsal only** is ticked, steps finish quickly with `[dry-run]` log lines and **nothing is created in the org**. That run also does **not** mark steps complete for dependency tracking.
 
 ### Optional — Rehearsal
 
-Tick **Rehearsal only**, click **Rehearse selected flow**, and inspect the preview files (`import-preview.csv`, `import-prevalidate.json`, summary HTML/JSON) without changing Azure DevOps. Untick it before the live run.
+Tick **Rehearsal only**, click **Rehearse selected flow**, and inspect the results card and preview files (`rehearsal-summary.html`, `import-prevalidate.csv`, `import-preview.csv`) without changing Azure DevOps. Untick it before the live run.
 
 **Cancel:** in Runner mode, **Cancel run** asks the runner to stop the job (`POST /jobs/{id}/cancel`); the button shows **Cancelling…** until it stops. The runner stops at the next safe point: between steps, at the next progress message inside Process/Layout/Project/Teams/Backlog, and in Catalog Import after in-flight creates finish (they are still written to `ado-id-map.csv`). Backfill is skipped; the job ends as **cancelled**. Steps that finished before the cancel are marked complete; Catalog is not, so run it again to resume. In Simulate/API modes, Cancel stops the client-side flow.
 
@@ -291,11 +303,11 @@ Free-text names for create or update, optional **project description**, and upda
 
 ### 3. Workflow selection
 
-Run mode radios + seven engine step cards with status overlays (running/completed/failed/skipped). Completion is cached per org/process/project in `localStorage`.
+Four run mode radios (Selected step only, Dependency-aware, Run from selected step onward, Full), the **Will run: …** plan line, and seven engine step cards with status overlays (running/completed/failed/skipped) and hints (**Starts here**, **In this run**, **Cached — will skip**). Completion is cached per org/process/project in `localStorage`.
 
 ### 4. Run configuration
 
-Template/catalog paths (Browse…), workbook version, **Catalog workers** (labelled **Threads** in Simulate/API), root area path, **Rehearsal only**, markdown conversion, **Preview plan**, **Run selected flow (live)** / **Rehearse selected flow**, live/rehearsal note, catalog progress bar, event log. Retry count and layout/backlog worksheet names only appear in Simulate/API modes; the runner reads sheet names from the template and handles retries itself.
+Template/catalog paths (Browse…), **Run output folder** (Browse… / Use default; remembered in the browser), workbook version, **Catalog workers** (labelled **Threads** in Simulate/API), root area path, **Rehearsal only**, markdown conversion, **Preview plan** (plan preview with data checks), **Run selected flow (live)** / **Rehearse selected flow**, live/rehearsal note, catalog progress bar, **results card**, event log. Retry count and layout/backlog worksheet names only appear in Simulate/API modes; the runner reads sheet names from the template and handles retries itself.
 
 The layout uses a wide content shell and full-width rows for long values (paths, PAT, org URL) so fields are not clipped beside unused white space.
 
@@ -322,7 +334,7 @@ Catalog Excel cells (Description, Agenda, Microsoft references, etc.) may contai
 
 ### Default (recommended) — preserve Markdown
 
-Matches ADO Toolkit WIT migration:
+How large-text cells are handled:
 
 - HTML cells → passed through unchanged
 - Markdown-like cells → left as authored
@@ -355,7 +367,7 @@ Hard sequence for a full run:
 process → layout → project → teams → backlog → catalog → report
 ```
 
-Project (and later project-phase steps) cannot start until process + layout succeed **unless** you use **Selected step only** to re-run a later card against an already-configured org.
+Project (and later project-phase steps) cannot start until process + layout succeed — in Dependency-aware, Run from selected step onward, and Full runs — **unless** you use **Selected step only** to re-run a later card against an already-configured org.
 
 | Step | ID | What it does |
 |------|----|--------------|
@@ -365,7 +377,7 @@ Project (and later project-phase steps) cannot start until process + layout succ
 | 4. Teams & Areas | `teams` | Create teams; area path tree; aggregate team area assignments (`includeChildren: false` unless Excel says otherwise) |
 | 5. Backlog Config | `backlog` | Rename/create backlog levels; assign WITs; set defaults; iteration paths; team backlog/iteration settings |
 | 6. Catalog Import | `catalog` | Import **all** matching catalog workbooks; Title 1..N parents; prevalidate; parallel create + resume + parent-link backfill |
-| 7. Report | `report` | Write HTML/JSON summary under `runner-out/` |
+| 7. Report | `report` | Write HTML/JSON summary under the run output folder (the summary is also written automatically at the end of every run) |
 
 ### Template sheets that drive process & backlog
 
@@ -386,16 +398,16 @@ Catalog Import is **one step for all catalog content** in the configured folder�
 | **Sources** | Every `.xlsx` matching name hints (Business Process Catalog, Deliverables, Objectives, Delivery Plan, SbD); template/guideline names excluded |
 | **Hierarchy** | Parent/child links follow **Title 1..N** columns (same model as [ADO CSV / BPC import guidance](https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops)). Title 1 = root; Title 2 child of prior Title 1; etc. |
 | **Keys** | Process sequence ID / Microsoft ID are stored on the work item and used as external keys for linking lookups; they do **not** derive the parent outline |
-| **Prevalidate** | Before create (and on Rehearsal only runs): normalize multi-select tokens; **case-insensitive** picklist align to template casing; strip `Area Path` = `Not found`, Test Case `State` = `New`, invalid single picklist values (no match); apply Fields-sheet **Default value** when a required applicable field is empty; report remaining required-empty / unknown multi-select tokens → `import-prevalidate.json` |
+| **Prevalidate (data checks)** | Before create (and on Rehearsal only runs; Preview plan shows the same checks): normalize multi-select tokens; **case-insensitive** picklist align to template casing; replace `Your Project Name Here` in Area / Iteration Path with the project name; rewrite the Area Path and Iteration Path project prefix to the target project; strip area paths that are not in the project, States not allowed for the type, and invalid single picklist values; shorten text over 255 characters; apply Fields-sheet **Default value** when a required applicable field is empty → `import-prevalidate.csv` / `.json` (see §15 *Catalog fails on Application family / Products / picklists*) |
 | **Description** | Spreadsheet Description mapped to `System.Description` only when non-empty; empty → field omitted (no synthetic “Imported from … row N”) |
 | **Create-only fields** | Successful creates are not field-updated on re-run. Keys already in `ado-id-map.csv` are **skipped** (resume). Delete the map (or use a clean project) to recreate |
 | **Parallelism** | UI **Catalog workers** (1–16, default 4) → `catalog_parallel_workers`. Parent-aware: a child is queued as soon as its parent is created. Start with 2–8 to limit ATCPU/429. Each worker reuses a keep-alive HTTPS connection |
 | **Parent-link backfill** | After create, ensures Hierarchy-Reverse for pairs in the id map. Rows whose `ado-id-map.csv` `ParentId` already matches were linked in the create call and are reported `already_linked` without another request; the rest are checked in parallel with the same worker count. Writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
-| **Create retries** | Creates are retried only when ADO rejected them (429/503). If the connection drops after a create was sent, the runner looks the item up (type + title + `MSBPC.microsoftid`): one match is adopted into the id map, no match is retried once, several matches are reported as possible duplicates in `import-failures.json` |
+| **Create retries** | Creates are retried only when ADO rejected them (429/503). If the connection drops after a create was sent, the runner looks the item up (type + title + `MSBPC.microsoftid`): one match is adopted into the id map, no match is retried once, several matches are reported as possible duplicates in `import-failures.csv` / `.json` |
 | **Log stats** | `created` / `skipped` / `linked` / `missing parent` / `failed` / `cancelled` / `reconciled` / worker count |
 | **Smoke tests** | API `catalog_limit` or a **Rehearsal only** run to avoid a full ~15k-row live import |
 
-**System.State:** Allowed values come from each work item type’s process state model in Azure DevOps (not the template Picklists sheet). Catalog rows often send `New`; that is valid for many Agile-style types but **invalid for Test Case** (prevalidate strips it). **Business approval state** is a separate custom picklist.
+**System.State:** Allowed values come from each work item type’s process state model in Azure DevOps (not the template Picklists sheet). Catalog rows often send `New`; that is valid for many Agile-style types but **invalid for Test Case** (prevalidate strips it). Live runs read each type's states from Azure DevOps and strip any other value it would reject (e.g. `Deprecated`); Preview plan and Rehearsal only can check only the Test Case rule. **Business approval state** is a separate custom picklist.
 
 **Example Backlogs sheet (test fixture):**
 
@@ -442,19 +454,25 @@ If an older apply created custom **Levels** / **Lowest** while leaving system **
 
 ## 11. Outputs and artifacts
 
-Root: `bpctool/runner-out/<org>_<project>/`, or `$BPCTOOL_OUTPUT_DIR/<org>_<project>/` when set (see §2 Folder layout). One folder per org + project, shared by every release and re-run — back it up and keep it.
+Root: `<Run output folder>/<org>_<project>/` — the folder chosen in Run configuration, else `$BPCTOOL_OUTPUT_DIR`, else `bpctool/runner-out` (see §2 Folder layout). One folder per org + project, shared by every release and re-run — back it up and keep it.
 
 | Artifact | When |
 |----------|------|
+| `bpc-ado-setup-summary.html` / `.json` | **Every live run** (success, failure, or cancel) — headline, what needs attention, step table, file list. Steps not run this time keep their last result from earlier runs of the same process/project |
+| `rehearsal-summary.html` / `.json` | Every Rehearsal only run (kept separate so it never overwrites the live summary) |
+| `import-failures.csv` | Live catalog run with failures — one row per failed item, opens in Excel: **Fix this row** vs **Blocked by parent**, plain-language problem, how to fix, source file + row, value tried, children blocked |
+| `import-failures.json` | Same data for tools: `{runId, generatedAt, summary, failures}` (was a bare list before 2026-10) |
+| `import-prevalidate.csv` | Catalog step (including Rehearsal only) — every value changed or removed before import, **Needs review?** rows first, with source file + row, value in spreadsheet, value used, how to fix |
+| `import-prevalidate.json` | Same checks as counts + examples, split into `automaticFixes` and `needsReview` |
 | `import-preview.csv` | Catalog step (including Rehearsal only runs) — sample drafts |
-| `import-prevalidate.json` | Catalog picklist / area / state preflight counts + samples |
 | `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, …; **appended** across runs for resume |
 | `backfill-links-report.csv` | Parent-link backfill statuses after catalog create |
-| `import-failures.json` | Live catalog create errors (key, WIT, title, parentKey, error, source) |
-| `bpc-ado-setup-summary.html` | Report step |
-| `bpc-ado-setup-summary.json` | Report step |
 
-`runner-out/` is gitignored. After a catalog run, check the event log for `Prevalidate: …`, resume/worker messages, `Parent-link backfill…`, and `Catalog import finished: created …, skipped …, linked …`. Every apply/simulate/API run ends with a **Run timing** block (per executed step + total).
+Every file written by a run carries the same run id (`runId`, the runner job id) and `generatedAt`, so you can tell whether the summary and the failures file came from the same run.
+
+**Results card.** When a run finishes, the UI shows a card under the run log with the headline, buttons to open the report and download the CSVs (served by the runner at `GET /outputs/{folder}/{file}`; only the files above), **What needs attention** (largest problems first, with example rows and the fix), a step list, and the automatic fixes. If catalog rows failed, **Set up Catalog Import re-run** selects Catalog Import as a single live step — `ado-id-map.csv` makes the re-run skip everything already created.
+
+`runner-out/` is gitignored. After a catalog run, the event log also shows `Data checks: …`, resume/worker messages, `Parent-link backfill…`, `N row(s) failed and blocked M child row(s)`, and `Catalog import finished: created …, skipped …, linked …`. Every apply/simulate/API run ends with a **Run timing** block (per executed step + total).
 
 ---
 
@@ -469,11 +487,12 @@ Via UI proxy: `/api/...`
 |--------|------|---------|
 | GET | `/health` | Liveness |
 | GET | `/defaults` | Newest release folder + template, `release_label`, `bpc_files_root`, `output_root` |
-| POST | `/plan/dry-run` | Parse Excel → IR → plan (no mutations) — UI **Preview plan** |
+| POST | `/plan/dry-run` | Parse Excel → IR → plan (no mutations) — UI **Preview plan**; includes `data_checks` when Catalog Import is selected |
 | POST | `/ir/parse` | Return full IR JSON |
 | POST | `/jobs` | Create a plan-only, rehearsal (`apply_dry_run`), or live apply job |
 | GET | `/jobs/{id}?since=N` | Poll job status/results; `since` returns only events from index N (`event_offset` / `event_total` in the response) |
 | POST | `/jobs/{id}/cancel` | Request a cooperative stop; status becomes `cancelled` |
+| GET | `/outputs/{folder}/{file}?root=` | Open/download a run output (summary HTML/JSON, failures / data-check CSV/JSON); `root` = the run output folder used (absolute; default output root when omitted); other file names are refused |
 | GET | `/fs/roots`, `/fs/list` | Local path browser used by Browse… |
 
 ### Job create body (important fields)
@@ -499,7 +518,8 @@ Via UI proxy: `/api/...`
   "convert_markdown_to_html": false,
   "steps": null,
   "catalog_limit": null,
-  "catalog_parallel_workers": 4
+  "catalog_parallel_workers": 4,
+  "output_root": null
 }
 ```
 
@@ -508,11 +528,14 @@ Via UI proxy: `/api/...`
 | `project_description` | Optional; set on create; PATCH on existing project when non-empty |
 | `mode` | `dry-run` = plan only; `apply` = run writers |
 | `apply_dry_run` | With `mode=apply`, run writers without ADO HTTP calls — UI **Rehearsal only** |
-| `convert_markdown_to_html` | Toolkit-style override; default `false` |
+| `convert_markdown_to_html` | Convert markdown-like text to HTML; default `false` (preserve markdown) |
 | `steps` | Optional subset, e.g. `["backlog"]` or `["catalog","report"]` |
 | `catalog_limit` | Cap drafts for smoke tests |
 | `catalog_parallel_workers` | Parent-aware Catalog Import and backfill workers (1–16; UI **Catalog workers**; default 4) |
 | `root_area_path` | Defaults to project name when omitted/empty in the UI |
+| `output_root` | Absolute folder for run outputs (UI **Run output folder**); results go to `<output_root>/<org>_<project>/`. Omit / `null` for `BPCTOOL_OUTPUT_DIR`, else `bpctool/runner-out` |
+
+Job results include `apply_result.outcome` — the same headline, notices, attention items, steps, and file list the UI results card shows. Preview plan responses include `notices` and, when Catalog Import is selected, `data_checks`.
 
 Apply jobs run in a background thread; poll `GET /jobs/{id}?since=<events received>` until `status` is `succeeded`, `failed`, or `cancelled`. Catalog Import emits `catalog-progress` events (`phase` create/backfill, `done`, `total`, counts, `elapsedMs`) about once a second.
 
@@ -554,7 +577,10 @@ React UI (Vite)
                       ├─ richtext.py         HTML detect / optional MD→HTML
                       ├─ catalog_import.py   Drafts, Title 1..N parents, multiline flags
                       ├─ catalog_runtime.py  Parallel create, id-map resume, parent backfill
-                      ├─ catalog_validate.py Prevalidate / sanitize before create
+                      ├─ catalog_validate.py Data checks (prevalidate) before create
+                      ├─ failure_explain.py  Plain-language failure causes + fixes
+                      ├─ run_outcome.py      Headline / attention / files for report + results card
+                      ├─ paths.py            Release folders, output root
                       ├─ mapping.py          Catalog headers → field refs
                       ├─ ado_client.py       REST client + retries + Multivalue / parent links
                       ├─ org_url.py          Org URL normalize/parse
@@ -592,7 +618,7 @@ npm run lint
 npm run build
 ```
 
-Notable runner coverage includes Excel IR (disabled WITs, backlogs), backlog rename/heal + WIT assignment, team area aggregation, team iterations / backlogIteration GUID, org URL normalize, layout booleans / multivalue control type, project description, Title-outline catalog parents, catalog prevalidate, and multi-select field labels.
+Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation, team iterations / backlogIteration GUID, org URL normalize, layout booleans / multivalue control type, project description, Title-outline catalog parents, catalog data checks (area / iteration / state / length / picklists), failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward).
 
 ---
 
@@ -732,7 +758,7 @@ Parent links follow **Title 1..N** (ADO CSV / [BPC import guidance](https://lear
 
 If many items are unlinked:
 
-1. Check `import-failures.json` — children fail with `Parent not imported` when the parent never got an id
+1. Open `import-failures.csv` and filter **Status = Fix this row** — children show **Blocked by parent** (with the parent key) when the parent never got an id; fixing the parent row unblocks them
 2. Review `backfill-links-report.csv` — run Catalog again to resume creates and backfill missing links
 3. Confirm the log shows `linked` / backfill counts; for a full rebuild after process/layout fixes, use a clean project or delete prior imports + `ado-id-map.csv`
 
@@ -750,24 +776,24 @@ Template fields with **Multi-select = Yes** are created as suggested picklists s
 2. Re-run **Process Template** (updates `isSuggested` / `isPicklistSuggested`) then **Page Layout** (binds multivalue control)
 3. Re-run **Catalog Import** on a clean project
 
-Catalog always runs **prevalidate** first (`import-prevalidate.json`):
+Catalog always runs **data checks** (prevalidate) first — `import-prevalidate.csv` lists every change, `import-prevalidate.json` the counts. **Preview plan** shows the same checks (from the workbooks only) in a **Catalog data checks** panel, so you can fix the spreadsheet before any run:
 
 | Action | Examples |
 |--------|----------|
-| Strip (allow create) | `Area Path` = `Not found`; Test Case `State` = `New`; invalid **single** picklist values (no case-insensitive match) |
-| Apply template default | Required applicable field empty in spreadsheet but Fields sheet has **Default value** (e.g. Business process flow source → `Microsoft`, Catalog status → `10 - New`) |
-| Normalize | Multi-select semicolon tokens (trim / rejoin); picklist **casing** to template canonical (e.g. Module `Organization Administration` → `Organization administration`) |
-| Report only | Required empty with **no** template default (e.g. Migration Data type); unknown multi-select tokens; source column mismatches (e.g. Job purpose filled with Job type values) |
+| Automatic fix (no action needed) | Fields-sheet **Default value** applied to an empty required field (e.g. Catalog status → `10 - New`); picklist **casing** aligned to the template (e.g. `Organization Administration` → `Organization administration`); Area Path and Iteration Path project prefix rewritten to the target project (`MSBPCProj\…` → `Contoso-BPC\…`, `MSBPCProj` → `Contoso-BPC`; iteration values are never removed); `Your Project Name Here` in Area / Iteration Path replaced with the project name; State casing aligned (live runs) |
+| Removed — needs review | `Area Path` not in the project (TF401347) or `Not found`; `State` not allowed for the type (e.g. `Deprecated`; live runs read the allowed states from Azure DevOps, Test Case `New` always); invalid **single** picklist values |
+| Shortened — needs review | Text longer than 255 characters in a string / picklist field or Title (TF401324) — cut to 254 + `…`; multi-select keeps whole values |
+| Report only | Required empty with **no** template default (and the value wasn't removed above); unknown multi-select tokens |
 
-Inspect `import-failures.json` for remaining ADO 400s after prevalidate.
+Anything Azure DevOps still rejects after the checks lands in `import-failures.csv` with a plain-language problem and fix.
 
 ### Recommended full setup after template/catalog updates
 
 1. **Preview plan** — confirm catalog file/row counts  
-2. **Process** → **Layout** → **Project** → **Teams** → **Backlog** (Full or Dependency-aware)  
+2. **Process** → **Layout** → **Project** → **Teams** → **Backlog** (Full or Dependency-aware; after a template change, **Run from selected step onward** from the first affected card)  
 3. Confirm Connection shows **Multivalue: installed** (or accept the Run-time install prompt)  
 4. **Catalog Import** (Selected step only is fine once the project exists)  
-5. Review `import-prevalidate.json`, `ado-id-map.csv`, `import-failures.json`, and linked/missing-parent log lines  
+5. Review the results card (or `bpc-ado-setup-summary.html`), then `import-failures.csv` and `import-prevalidate.csv` for anything flagged  
 
 Use a **Rehearsal only** run + optional `catalog_limit` (API) for a smoke test before a full ~15k-row import.
 
@@ -793,6 +819,7 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - Disabling inherited system WITs via the public Process API can fail; manual disable in the ADO UI may still be required
 - `System.State` allowed values are owned by ADO process WIT models — not authored in the template Picklists sheet
 - Some Deliverables source columns (e.g. Job purpose / Job type / Data type) may not align with template picklists; prevalidate strips or reports but does not rewrite Microsoft source data
+- Catalog **Iteration Path** values only get their project name fixed; they are not checked against the project's iterations. **State** values are checked against Azure DevOps on live runs only
 - Catalog import of ~15k rows (all matching workbooks) is long-running; use a **Rehearsal only** run + `catalog_limit` for smoke tests; tune **Catalog workers** (2–8 typical)
 - Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links. Updated spreadsheet rows do **not** refresh existing work item fields
 - Catalog still uses one REST create per work item (parent-aware parallel, keep-alive connections); no WIT `$batch`
@@ -816,13 +843,13 @@ In the browser:
   1. Connection → Ready (Runner mode); org URL + PAT are session-only
      Confirm Multivalue: installed (required for process/layout/project)
   2. Process + project names (+ optional description)
-  3. Workflow: Selected step only / Dependency-aware / Full
+  3. Workflow: Selected step only / Dependency-aware / From selected step onward / Full
   4. Load runner defaults → Preview plan (check catalog files/rows)
   Preview plan never changes ADO; "Rehearsal only" ticked = Rehearse selected flow
   Rehearsal only UNCHECKED → Run selected flow (live) — red note names the target
   After run: check Run timing (per step + total) in the event log
-  After catalog: review import-prevalidate.json, ado-id-map.csv,
-                 backfill-links-report.csv, import-failures.json
+  After any run: results card → Open report; Download failures / data checks
+  Keep ado-id-map.csv — a Catalog re-run resumes from it
 ```
 
 Developer equivalent: `npm run setup` once, then `npm start` each session.
@@ -832,7 +859,8 @@ Defaults:
 - Folders: `~/BPC Files/<YYYY-Qn>/` per release (template + catalog workbooks); override root with `BPCTOOL_CATALOG` in `bpctool.env`
 - Template: user-provided ADO guideline `.xlsx` in the release folder (not bundled; or `BPCTOOL_TEMPLATE`)
 - Catalog folder: newest release folder (BPC + Deliverables + Objectives + SbD)
-- Outputs: `runner-out/<org>_<project>/` or `BPCTOOL_OUTPUT_DIR` — keep `ado-id-map.csv`
+- Outputs: `<Run output folder>/<org>_<project>/` (default `BPCTOOL_OUTPUT_DIR`, else `runner-out/`) — keep `ado-id-map.csv`
+- `Your Project Name Here` in area / iteration paths → the project name (reported in the results)
 - Root area path: project name
 - Markdown: preserved unless “Convert Markdown…to HTML” is checked
 - Empty Description: omitted (no synthetic import placeholder)

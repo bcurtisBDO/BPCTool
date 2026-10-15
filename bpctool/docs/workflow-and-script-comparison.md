@@ -6,7 +6,7 @@ BPCTool does **not** spawn those scripts — it reimplements the intent with Exc
 
 **Quarterly releases:** Microsoft refreshes the ADO template guideline, the catalog workbooks, and the reference scripts on a quarterly basis. BPCTool is not tied to one release: keep each release in its own folder (`~/BPC Files/<YYYY-Qn>/` with the template and catalog workbooks together — see USER_GUIDE §2 Folder layout); Load runner defaults selects the newest one and uses its name as **Workbook version**. Sheet names and the matrix / L1–L4 conventions below are what BPCTool expects; re-check them when a new release lands.
 
-**Assessment date:** 2026-10-06. Covers orchestration, template matrix (`X` shown / `H` hidden), Catalog parallel/resume/backfill, incremental re-runs, and conflict handling vs reference Phase 5 / Scripts 1–6.
+**Assessment date:** 2026-10-15. Covers orchestration, template matrix (`X` shown / `H` hidden), Catalog parallel/resume/backfill, incremental re-runs, and conflict handling vs reference Phase 5 / Scripts 1–6.
 
 ---
 
@@ -31,9 +31,9 @@ Multivalue preflight (extmgmt)
 | **teams** | Teams + area paths (reference Script 3 semantics) |
 | **backlog** | Backlog behaviors, WIT assignment, iterations, team settings (reference Script 4) |
 | **catalog** | Import catalog workbooks: prevalidate → parent-aware parallel create → resume → parent-link backfill |
-| **report** | Local HTML/JSON summary under `runner-out/` |
+| **report** | Local HTML/JSON summary in the run output folder (also written at the end of every run) |
 
-**Live apply only:** Multivalue preflight runs when process, layout, or project is selected and **Rehearsal only** is off (**Run selected flow (live)**). **Preview plan** (plan only) and **Rehearsal only** (`apply_dry_run`: writers run, no ADO client) skip ADO mutation (and the Multivalue UI gate). **Report** never calls ADO. Full / dependency-aware runs enforce the sequence above; selected-step mode can run a single card alone.
+**Live apply only:** Multivalue preflight runs when process, layout, or project is selected and **Rehearsal only** is off (**Run selected flow (live)**). **Preview plan** (plan only) and **Rehearsal only** (`apply_dry_run`: writers run, no ADO client) skip ADO mutation (and the Multivalue UI gate). **Report** never calls ADO. Full, dependency-aware, and run-from-selected-step-onward runs enforce the sequence above; selected-step mode can run a single card alone.
 
 Recommended hard sequence (planner): `process → layout → verify → project → teams → backlog → catalog → report`.
 
@@ -126,8 +126,8 @@ Aligned with reference Phase 5 on the operational import model; still create-onl
 | **Resume** | Load existing `ado-id-map.csv`; skip keys already imported; append new rows |
 | **Parent-link backfill** | Rows whose id-map `ParentId` matches were linked at create → `already_linked` with no GET. The rest: parallel `GET` relations + `PATCH` missing Hierarchy-Reverse. Writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
 | **Cancel / progress** | `POST /jobs/{id}/cancel` stops after in-flight creates (recorded in the id map), skips backfill; `catalog-progress` events drive a UI progress bar + ETA |
-| **Failures** | If a parent never imports, children fail with `Parent not imported` (not created unlinked) |
-| **Prevalidate** | Local sanitize before create (`import-prevalidate.json`): strip bad Area Path / Test Case State=New, case-insensitive picklist normalize, required-field defaults, empty Description omitted (no synthetic placeholder) |
+| **Failures** | If a parent never imports, children fail with `Parent not imported` (not created unlinked). `import-failures.csv` separates root causes from blocked children, explains each ADO error (TF401347, TF401324, invalid State, …) in plain language with a fix |
+| **Prevalidate** | Local sanitize before create (`import-prevalidate.csv` / `.json`; also in Preview plan): `Your Project Name Here` → project name in Area / Iteration Path, Area Path and Iteration Path project-prefix rewrite, strip area paths not in the project (live: read from ADO), strip States the type doesn't allow (live: read from ADO; Test Case New always), shorten text over 255 chars, case-insensitive picklist normalize, required-field defaults, empty Description omitted (no synthetic placeholder) |
 | **Not done** | WIT `$batch` / native CSV bulk upload; WIP field upsert against existing work items |
 
 **Performance note:** Parallel workers cut wall time vs the former 1×N serial create loop (often several× when network-bound). Keep-alive connections and skipping backfill GETs for links made at create remove roughly one round-trip plus a TLS handshake per item. Start at 2–8 workers; higher counts risk ATCPU/429. Chunked WIT `$batch` would reduce round-trips further but is not implemented.
@@ -148,10 +148,11 @@ Vite proxies `/api/*` → FastAPI on `127.0.0.1:8787`.
 | `POST /jobs` | Start live apply or rehearsal (`apply_dry_run`, UI **Rehearsal only**) |
 | `GET /jobs/{id}?since=N` | Poll step results + events from index N (incremental) |
 | `POST /jobs/{id}/cancel` | Cooperative stop → status `cancelled` |
+| `GET /outputs/{folder}/{file}?root=` | Serve a known run output (report, failures / data-check CSV) for the results card |
 | `GET /fs/roots`, `GET /fs/list` | Path picker Browse… |
 | `POST /ir/parse` | Full IR dump (manual; UI does not call) |
 
-Job body fields: `catalog_parallel_workers` (1–16; UI **Catalog workers**); `update_policy` + confirm flags for process/project gates. The UI stores the active job id in `sessionStorage` and reattaches after a page reload.
+Job body fields: `catalog_parallel_workers` (1–16; UI **Catalog workers**); `output_root` (UI **Run output folder**); `update_policy` + confirm flags for process/project gates. The UI stores the active job id in `sessionStorage` and reattaches after a page reload.
 
 Browser inventory reads use `/ado-proxy/{org}` → `dev.azure.com`. Extension check/install uses `/extmgmt-proxy/{org}` → `extmgmt.dev.azure.com`.
 
@@ -173,7 +174,7 @@ Hosts:
 | **teams** | `apply_teams` (reference Script 3) | `GET\|POST …/projects/{id}/teams` · `GET\|POST` classificationnodes/Areas · `PATCH` teamsettings/teamfieldvalues |
 | **backlog** | `apply_backlog` (reference Script 4) | Process behaviors (GET/PUT/POST/DELETE) · WIT↔behavior · Iterations nodes · `GET\|PATCH` teamsettings · team iterations |
 | **catalog** | `apply_catalog` + prevalidate + `catalog_runtime` | Parallel `PATCH …/wit/workitems/$Type` (fields + optional Markdown format + optional Hierarchy-Reverse); resume via `ado-id-map.csv`; `POST …/wit/wiql` only to reconcile a create with unknown outcome; backfill `GET …?$expand=Relations` + `PATCH …/workitems/{id}` for parent links not recorded at create |
-| **report** | `apply_report` | None — writes `bpc-ado-setup-summary.json` / `.html` under `runner-out/<org>_<project>/` |
+| **report** | `apply_report` | None — writes `bpc-ado-setup-summary.json` / `.html` under `<Run output folder>/<org>_<project>/` (also written automatically at the end of every live run; Rehearsal writes `rehearsal-summary.*`) |
 
 Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catalog_runtime.py`, `writers/*.py`.
 
@@ -216,10 +217,10 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 | **Catalog parent backfill** | `backfill-links` CLI (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) | Automatic parallel post-create backfill → same statuses; links recorded at create skip the GET; conflicts **not** force-reparented | Improved / ported |
 | **Catalog prevalidate** | Phase 5 sanitizes / maps before create | Local prevalidate + case-insensitive picklist rewrite; empty Description omitted | Improved / ported |
 | **Catalog field updates** | Create/import mode; limited recovery updates | Create-only fields (no WIP upsert); spreadsheet edits to mapped keys do not refresh ADO | Near parity / residual |
-| **Report** | Script 6 HTML summary from artifacts | Local HTML/JSON under `runner-out/` (no ADO calls) | Improved / ported |
+| **Report** | Script 6 HTML summary from artifacts | Plain-language HTML/JSON (headline, what needs attention, steps, files) written after every run, plus a UI results card (no ADO calls) | Improved |
 | **UI execution modes** | N/A (CLI scripts) | Runner = apply; API = reads only; Simulate = stubs | Improved / ported |
 | **Edge-case parity** | Full script surface + many ADO quirk workarounds | Template-shaped, not line-for-line; residual: system WIT disable fragility, field 404 on re-run, Deliverables picklist mismatches | Gap / residual |
-| **Observability / UX** | Per-script console/files; limited structured UI | Job events, Run timing, plan preview, prevalidate / failures / id-map / backfill artifacts | Improved / ported |
+| **Observability / UX** | Per-script console/files; limited structured UI | Job events, Run timing, plan preview with data checks, results card, Excel-ready failures / data-check CSVs with fixes, id-map / backfill artifacts | Improved |
 
 ### Known residual vs the reference scripts
 

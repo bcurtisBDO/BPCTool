@@ -5,6 +5,7 @@ def test_format_duration_ms() -> None:
     assert format_duration_ms(42) == "42ms"
     assert format_duration_ms(1500) == "1.5s"
     assert format_duration_ms(65_000) == "1m 5.0s"
+    assert format_duration_ms(6_917_548) == "1h 55m"
 
 
 def test_summarize_timings() -> None:

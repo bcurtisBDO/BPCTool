@@ -17,7 +17,11 @@ from .models import (
     JobCreateRequest,
     JobStatusResponse,
 )
+from .catalog_import import load_catalog_drafts
+from .catalog_validate import prevalidate_catalog_drafts, prevalidate_summary
+from .mapping import build_mapping_from_ir
 from .planner import build_dry_run_plan
+from .run_outcome import catalog_placeholder_count, project_name_notice
 from .timing import format_duration_ms
 
 _lock = threading.Lock()
@@ -36,7 +40,7 @@ def run_dry_run(request: DryRunRequest) -> DryRunResponse:
         process_name=request.process_name,
         project_name=request.project_name,
     )
-    return build_dry_run_plan(
+    plan = build_dry_run_plan(
         ir,
         update_policy=request.update_policy,
         confirm_process_update=request.confirm_process_update,
@@ -45,6 +49,24 @@ def run_dry_run(request: DryRunRequest) -> DryRunResponse:
         known_project_exists=request.known_project_exists,
         step_filter=request.steps,
     )
+    if (not request.steps or "catalog" in request.steps) and ir["counts"].get("catalog_rows"):
+        plan.data_checks = catalog_data_checks(ir)
+    notice = project_name_notice(
+        request.project_name,
+        template_rows=int((ir.get("project") or {}).get("project_placeholders_replaced") or 0),
+        catalog_values=catalog_placeholder_count(plan.data_checks),
+    )
+    if notice:
+        plan.notices.append(notice)
+    return plan
+
+
+def catalog_data_checks(ir: dict[str, Any]) -> dict[str, Any]:
+    """Offline catalog checks (no Azure DevOps calls); States are checked on live runs."""
+    mapping = build_mapping_from_ir(ir)
+    drafts = load_catalog_drafts(ir["source"].get("catalog_source_dir"), mapping)
+    result = prevalidate_catalog_drafts(drafts, ir, mapping, sanitize=True)
+    return prevalidate_summary(result, examples=3)
 
 
 def create_job(request: JobCreateRequest) -> JobStatusResponse:
@@ -172,6 +194,7 @@ def _execute_job(job_id: str) -> None:
             step_filter=request.steps,
             catalog_limit=request.catalog_limit,
             should_cancel=cancel_event.is_set,
+            run_id=job_id,
         )
 
         finished = _now()
@@ -187,7 +210,7 @@ def _execute_job(job_id: str) -> None:
             if apply_result.ok:
                 status = "succeeded"
                 message = (
-                    f"Apply {'dry-run ' if apply_result.dry_run else ''}finished "
+                    f"{'Rehearsal' if apply_result.dry_run else 'Run'} finished "
                     f"({format_duration_ms(duration_ms)})"
                 )
             elif apply_result.cancelled:

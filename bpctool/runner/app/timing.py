@@ -13,6 +13,8 @@ def format_duration_ms(ms: int | float | None) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     minutes = int(seconds // 60)
+    if minutes >= 60:
+        return f"{minutes // 60}h {minutes % 60}m"
     rem = seconds - minutes * 60
     return f"{minutes}m {rem:.1f}s"
 

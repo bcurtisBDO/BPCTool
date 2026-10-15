@@ -13,6 +13,7 @@ from .models import ApplyResult, DryRunRequest, DryRunResponse
 from .org_url import normalize_ado_org_url, parse_ado_org_url
 from .paths import output_root
 from .planner import STEP_ORDER, build_dry_run_plan
+from .run_outcome import project_name_notice
 from .timing import format_duration_ms, summarize_timings
 from .writers import (
     apply_backlog,
@@ -23,6 +24,7 @@ from .writers import (
     apply_report,
     apply_teams,
 )
+from .writers.report import write_run_summary
 
 Emit = Callable[[dict[str, Any]], None]
 
@@ -36,10 +38,11 @@ def _safe_part(value: str) -> str:
     return slug.strip("._-") or "ado"
 
 
-def default_output_dir(org_url: str, project_name: str) -> Path:
+def default_output_dir(org_url: str, project_name: str, root: str | None = None) -> Path:
     parsed = parse_ado_org_url(org_url)
     org = parsed.org if parsed.ok else "org"
-    return output_root() / _safe_part(f"{org}_{project_name}")
+    base = Path(root).expanduser() if (root or "").strip() else output_root()
+    return base / _safe_part(f"{org}_{project_name}")
 
 
 def run_apply(
@@ -51,10 +54,13 @@ def run_apply(
     step_filter: list[str] | None = None,
     catalog_limit: int | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    run_id: str | None = None,
 ) -> ApplyResult:
     events: list[dict[str, Any]] = []
     timings: list[dict[str, Any]] = []
     run_started = time.perf_counter()
+    run_started_wall = time.time()
+    run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
     cancel_requested = should_cancel or (lambda: False)
 
     def _emit(event: dict[str, Any]) -> None:
@@ -108,7 +114,7 @@ def run_apply(
         )
 
     org_url = normalize_ado_org_url(request.org_url)
-    output_dir = default_output_dir(org_url, request.project_name)
+    output_dir = default_output_dir(org_url, request.project_name, request.output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Dry-run apply never calls Azure DevOps; client is only created for live apply.
@@ -117,9 +123,42 @@ def run_apply(
     process_id: str | None = None
 
     planned = {step["id"]: step for step in plan.steps}
+
+    def _write_summary(error: str | None, cancelled: bool) -> dict[str, Any] | None:
+        """Every run (incl. failed/cancelled) refreshes the summary so files never disagree."""
+        try:
+            outcome = write_run_summary(
+                ir,
+                step_results=step_results,
+                output_dir=output_dir,
+                org_url=org_url,
+                dry_run=dry_run,
+                run_id=run_id,
+                run_started=run_started_wall,
+                error=error,
+                cancelled=cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 - never mask the run's own result
+            _emit({"type": "step-progress", "stepId": "report", "message": f"Could not write summary: {exc}"})
+            return None
+        _emit(
+            {
+                "type": "step-progress",
+                "stepId": "report",
+                "message": f"Summary: {outcome['headline']}",
+            }
+        )
+        return outcome
     selected = step_filter or STEP_ORDER
 
     _emit({"type": "apply-started", "message": f"Starting {'dry-run apply' if dry_run else 'apply'}"})
+    template_notice = project_name_notice(
+        request.project_name,
+        template_rows=int((ir.get("project") or {}).get("project_placeholders_replaced") or 0),
+        catalog_values=0,
+    )
+    if template_notice:
+        _emit({"type": "info", "message": template_notice})
 
     try:
         # Live process/layout/project requires DevLabs Multivalue extension (UI also preflights).
@@ -208,6 +247,7 @@ def run_apply(
                     ),
                     progress=catalog_progress,
                     should_cancel=cancel_requested,
+                    run_id=run_id,
                 )
             elif step_id == "report":
                 result = apply_report(
@@ -217,6 +257,8 @@ def run_apply(
                     org_url=org_url,
                     emit=step_emit,
                     dry_run=dry_run,
+                    run_id=run_id,
+                    run_started=run_started_wall,
                 )
             else:
                 result = {"skipped": True, "reason": f"Unknown step {step_id}"}
@@ -250,22 +292,7 @@ def run_apply(
             )
 
         check_cancel()
-        # Ensure report exists even if filtered out mid-run
-        if "report" not in step_results and (not step_filter or "report" in selected):
-            step_started = time.perf_counter()
-            report_result = apply_report(
-                ir,
-                step_results=step_results,
-                output_dir=output_dir,
-                org_url=org_url,
-                emit=step_emit,
-                dry_run=dry_run,
-            )
-            duration_ms = int((time.perf_counter() - step_started) * 1000)
-            step_results["report"] = {**report_result, "duration_ms": duration_ms}
-            timings.append(
-                {"stepId": "report", "durationMs": duration_ms, "skipped": False}
-            )
+        outcome = _write_summary(None, False)
 
         total_ms = int((time.perf_counter() - run_started) * 1000)
         summary_text = summarize_timings(timings, total_ms=total_ms)
@@ -288,6 +315,8 @@ def run_apply(
             events=events,
             duration_ms=total_ms,
             timings=timings,
+            run_id=run_id,
+            outcome=outcome,
         )
     except Exception as exc:  # noqa: BLE001
         total_ms = int((time.perf_counter() - run_started) * 1000)
@@ -323,4 +352,6 @@ def run_apply(
             events=events,
             duration_ms=total_ms,
             timings=timings,
+            run_id=run_id,
+            outcome=_write_summary(None if cancelled else str(exc), cancelled),
         )

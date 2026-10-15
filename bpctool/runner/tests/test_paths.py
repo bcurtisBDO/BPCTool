@@ -58,6 +58,50 @@ def test_env_overrides(monkeypatch, tmp_path: Path) -> None:
     )
 
 
+def test_user_selected_output_root_keeps_org_project_folder(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BPCTOOL_OUTPUT_DIR", str(tmp_path / "env"))
+    chosen = tmp_path / "chosen"
+    assert default_output_dir("https://dev.azure.com/contoso", "BPC Proj", str(chosen)) == (
+        chosen / "contoso_BPC_Proj"
+    )
+    assert default_output_dir("https://dev.azure.com/contoso", "BPC Proj", "") == (
+        tmp_path / "env" / "contoso_BPC_Proj"
+    )
+
+
+def test_output_root_must_be_absolute() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from app.models import DryRunRequest
+
+    base = {
+        "org_url": "https://dev.azure.com/contoso",
+        "process_name": "Proc",
+        "project_name": "Proj",
+        "excel_file": "/tmp/t.xlsx",
+    }
+    assert DryRunRequest(**base, output_root="  ").output_root is None
+    assert DryRunRequest(**base, output_root="/data/out").output_root == "/data/out"
+    with pytest.raises(ValidationError):
+        DryRunRequest(**base, output_root="relative/out")
+
+
+def test_template_project_placeholder_replaced() -> None:
+    from app.excel_ir import _apply_project_name, replace_project_placeholder
+
+    assert replace_project_placeholder("Your Project Name Here\\Sprint 1", "Contoso") == "Contoso\\Sprint 1"
+    assert replace_project_placeholder("[YOUR PROJECT NAME HERE]", "Contoso") == "Contoso"
+    assert replace_project_placeholder("Business process catalog", "Contoso") == "Business process catalog"
+    areas = [{"path": "Your Project Name Here\\Finance", "default_segment": "Finance"}]
+    iterations = [{"path": "Your Project Name Here", "level": "1"}]
+    teams = [{"name": "T", "backlog_iteration": "Your Project Name Here\\Phase 1"}]
+    assert _apply_project_name(areas, iterations, teams, "Contoso") == 3
+    assert areas[0]["path"] == "Contoso\\Finance"
+    assert iterations[0]["path"] == "Contoso"
+    assert teams[0]["backlog_iteration"] == "Contoso\\Phase 1"
+
+
 def test_catalog_kind() -> None:
     assert catalog_kind(Path("Business Process Catalog OCT 2026.xlsx")) == "Business Process Catalog"
     assert catalog_kind(Path("SbD Delivery Plan.xlsx")) == "SbD Delivery Plan"

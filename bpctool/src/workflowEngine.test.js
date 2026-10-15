@@ -106,6 +106,28 @@ describe('resolveTargetSteps', () => {
     expect(resolveTargetSteps('step', 'backlog', [])).toEqual(['backlog'])
     expect(resolveTargetSteps('step', 'catalog', ['process'])).toEqual(['catalog'])
   })
+
+  it('runs the selected step and every later step in from mode, including completed ones', () => {
+    const all = workflowDefinitions.map((step) => step.id)
+    expect(resolveTargetSteps('from', 'layout', all)).toEqual([
+      'layout',
+      'project',
+      'teams',
+      'backlog',
+      'catalog',
+      'report',
+    ])
+    expect(resolveTargetSteps('from', 'catalog', ['process', 'layout'])).toEqual([
+      'catalog',
+      'report',
+    ])
+    expect(resolveTargetSteps('from', 'process', [])).toEqual(all)
+  })
+
+  it('withholds project-phase steps in from mode until process and layout are done', () => {
+    expect(resolveTargetSteps('from', 'teams', ['process'])).toEqual([])
+    expect(resolveTargetSteps('from', 'layout', [])).toEqual(['layout'])
+  })
 })
 
 describe('validateRunnerConfig', () => {

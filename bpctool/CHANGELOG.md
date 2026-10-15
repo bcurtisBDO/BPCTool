@@ -2,6 +2,27 @@
 
 All notable changes to BPCTool (React UI + local runner) are documented here.
 
+## 2026-10 — Run results a standard user can act on
+
+- **Data checks before import** (Preview plan, Rehearsal only, live): Area Path project prefix rewritten to the target project (`MSBPCProj\…` → `<project>\…`); area paths not in the project stripped (TF401347; live runs read the project's area tree); States the type doesn't allow stripped (live runs read each type's states, e.g. `Deprecated`; state casing aligned and listed as an automatic fix); text over 255 characters in string/picklist fields and Title shortened to 254 + `…` (TF401324; multi-select keeps whole values). A removed picklist value is no longer reported again as "required field empty"
+- **Preview plan** shows a **Catalog data checks** panel (counts, example file/row/value, how to fix) — `data_checks` on `POST /plan/dry-run`
+- `import-prevalidate.json` splits **automaticFixes** vs **needsReview**; new **`import-prevalidate.csv`** lists every change (source file, row, value in spreadsheet, value used, how to fix; review rows first)
+- New **`import-failures.csv`**: **Fix this row** vs **Blocked by parent**, plain-language problem + fix per ADO error type, value tried, source file + row, children blocked. `import-failures.json` is now `{runId, generatedAt, summary, failures}` (was a bare list)
+- **Summary written after every run** (success, failure, cancel), not only when the Report step runs; steps not run this time keep their last result. Rehearsal writes `rehearsal-summary.*` instead of overwriting the live summary. All files share the job's `runId`
+- **HTML report rewritten**: status banner + headline, What needs attention (largest first, with fixes and file links), Fixed automatically, step table, file list, run details; raw JSON tucked away
+- **Results card** in the UI after each run: headline, Open report / Download failures / Download data checks, attention list, steps, **Set up Catalog Import re-run** (resumes from `ado-id-map.csv`). New `GET /outputs/{folder}/{file}` serves only known output files
+- **Run output folder** in Run configuration (Browse…, Use default; remembered in the browser): results go to `<folder>/<org>_<project>/`. Empty = `BPCTOOL_OUTPUT_DIR`, else `runner-out`. API: `output_root` on job requests (absolute path); `GET /outputs/…?root=` serves files from it
+- **`Your Project Name Here`** in area / iteration paths is replaced with the form's Project name — template Area paths, Iteration paths and Teams *Backlog iteration*, plus catalog **Area Path** / **Iteration Path**. Reported as a highlighted *Project name applied …* line (with counts) in Preview plan, the run log, the results card, and the HTML report; each value is in `import-prevalidate.csv`
+- Catalog **Iteration Path** gets the same project-prefix fix as Area Path (catalog workbooks ship `MSBPCProj`, which a differently named project rejects); values are only re-prefixed, never removed
+- Fix: TF401347 on **Iteration Path** was explained as an area-path problem in `import-failures.csv`; it now names the iteration path and its fix
+- Fix: template placeholder count no longer double-counts an area row whose path and default segment both changed
+- New run mode **Run from selected step onward**: runs the selected card and every later card, including completed ones (Process + Layout gate still applies)
+- Durations of an hour or more show as `1h 55m`
+- Removed wording that described BPCTool as part of a larger toolkit — it is a standalone app
+- Tests: `test_failure_explain.py`, `test_run_outcome.py`, more `test_catalog_validate.py` cases
+- **Docs rationalized:** one [`README.md`](../README.md) at the repo root covers the tool and its usage (requirements, launch, checklist, screenshots, folder layout, modes, results, documentation index, developer notes). Removed `bpctool/README.md`, `bpctool/docs/README.md`, and `bpctool/docs/reference/README.md`; their content is in the root README. Detailed docs stay in `USER_GUIDE.md`, `CHANGELOG.md`, and `docs/`
+- **Docs refreshed for the current UI:** new infographic [`docs/images/bpctool-overview.svg`](docs/images/bpctool-overview.svg) (what you need, how you use it, what you get) at the top of the README and USER_GUIDE. All README screenshots retaken (dark mode, same width): the workflow shot shows the four run modes with **Run from selected step onward**, the run configuration shot shows the **Run output folder**, and new `ui-preview-plan.png` and `ui-results-card.png` show the *Project name applied* notice, catalog data checks, and the results card
+
 ## 2026-10 — Clearer run modes: Preview plan / Rehearsal only / live
 
 - **Preview plan** (was “Preview plan (dry-run)”): builds the plan from the Excel only; no Azure DevOps calls.
@@ -86,7 +107,7 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 
 ## 2026-08 — Docs: README UI screenshots
 
-- Added `docs/images/` screenshots (Connection / Multivalue, workflow cards, run config, Catalog Threads + actions) linked from [`README.md`](./README.md#screenshots)
+- Added `docs/images/` screenshots (Connection / Multivalue, workflow cards, run config, Catalog Threads + actions) linked from [`README.md`](../README.md#screenshots)
 
 ## 2026-08 — Docs: catalog parallel / resume / backfill
 
@@ -271,7 +292,7 @@ API surface:
 - Workflow cards expanded to include **catalog** and **report**
 - Removed dependency on reference script filenames as executors (labels now `runner · <step>`)
 
-### Rich text (ADO Toolkit parity)
+### Rich text
 
 | Behavior | Detail |
 |----------|--------|

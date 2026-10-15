@@ -78,7 +78,7 @@ export const workflowDefinitions = [
     id: 'report',
     title: '7. HTML/JSON Report',
     script: 'runner · report',
-    description: 'Emit setup/import summary artifacts under runner-out/.',
+    description: 'Write the plain-language run report (HTML/JSON) to the run output folder.',
     inputs: ['Output folder'],
     durationMs: 400,
     phase: 'report',
@@ -142,9 +142,10 @@ const throwIfAborted = (signal) => {
  *
  * - `step`: only the selected card (re-run even if already completed; no prerequisites)
  * - `single`: dependency-aware run through the selected card (skips completed)
+ * - `from`: the selected card and every later card (re-runs completed ones)
  * - `full`: all incomplete steps in order
  *
- * For `single` / `full`, project-phase steps are withheld until process + layout
+ * For `single` / `from` / `full`, project-phase steps are withheld until process + layout
  * are already complete or included earlier in the same plan.
  */
 export function resolveTargetSteps(mode, selectedWorkflowId, completedStepIds) {
@@ -155,7 +156,13 @@ export function resolveTargetSteps(mode, selectedWorkflowId, completedStepIds) {
   }
 
   let candidates
-  if (mode === 'full') {
+  if (mode === 'from') {
+    const selectedIndex = stepOrder.indexOf(selectedWorkflowId)
+    if (selectedIndex < 0) {
+      return []
+    }
+    candidates = stepOrder.slice(selectedIndex)
+  } else if (mode === 'full') {
     candidates = stepOrder.filter((stepId) => !completedSet.has(stepId))
   } else {
     // Default / legacy: dependency-aware (`single`)
@@ -361,6 +368,9 @@ export function formatDurationMs(ms) {
     return `${seconds.toFixed(1)}s`
   }
   const minutes = Math.floor(seconds / 60)
+  if (minutes >= 60) {
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  }
   const rem = seconds - minutes * 60
   return `${minutes}m ${rem.toFixed(1)}s`
 }

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DryRunRequest(BaseModel):
@@ -45,9 +46,16 @@ class DryRunRequest(BaseModel):
     convert_markdown_to_html: bool = Field(
         default=False,
         description=(
-            "ADO Toolkit-style override: convert markdown-like large-text Excel "
+            "Override: convert markdown-like large-text Excel "
             "content to HTML. Default false preserves markdown and sets "
             "multilineFieldsFormat=Markdown on create."
+        ),
+    )
+    output_root: str | None = Field(
+        default=None,
+        description=(
+            "Folder that holds the <org>_<project> run output folders; "
+            "empty uses BPCTOOL_OUTPUT_DIR or bpctool/runner-out"
         ),
     )
     catalog_parallel_workers: int = Field(
@@ -59,6 +67,16 @@ class DryRunRequest(BaseModel):
             "(UI Catalog workers control). Use 1 for serial."
         ),
     )
+
+    @field_validator("output_root")
+    @classmethod
+    def _absolute_output_root(cls, value: str | None) -> str | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+        if not Path(text).expanduser().is_absolute():
+            raise ValueError("Run output folder must be an absolute path.")
+        return text
 
 
 class PlanAction(BaseModel):
@@ -81,6 +99,14 @@ class DryRunResponse(BaseModel):
     actions: list[PlanAction]
     errors: list[str] = []
     warnings: list[str] = []
+    notices: list[str] = Field(
+        default_factory=list,
+        description="Informational lines, e.g. the project name substituted into workbook paths",
+    )
+    data_checks: dict[str, Any] | None = Field(
+        default=None,
+        description="Catalog data checks (needs review / fixed automatically) from Preview plan",
+    )
 
 
 class ApplyResult(BaseModel):
@@ -96,6 +122,11 @@ class ApplyResult(BaseModel):
     timings: list[dict[str, Any]] = Field(
         default_factory=list,
         description="Per-step duration rows: stepId, durationMs, skipped",
+    )
+    run_id: str | None = None
+    outcome: dict[str, Any] | None = Field(
+        default=None,
+        description="Plain-language results: headline, steps, attention items, output files",
     )
 
 

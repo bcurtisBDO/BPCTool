@@ -61,6 +61,12 @@ export async function cancelRunnerJob(jobId) {
   return parsePayload(response)
 }
 
+/** URL for a run output file (report, failures, data checks) served by the runner. */
+export const outputFileUrl = (folder, name, root = '') =>
+  `/api/outputs/${encodeURIComponent(folder)}/${encodeURIComponent(name)}${
+    root ? `?root=${encodeURIComponent(root)}` : ''
+  }`
+
 export const isActiveJobStatus = (status) => status === 'queued' || status === 'running'
 
 /**
@@ -145,6 +151,7 @@ export function buildRunnerJobBody({
   catalogLimit = null,
   convertMarkdownToHtml = false,
   catalogParallelWorkers = 4,
+  outputRoot = '',
 }) {
   return {
     org_url: orgUrl,
@@ -166,6 +173,7 @@ export function buildRunnerJobBody({
     steps,
     catalog_limit: catalogLimit,
     convert_markdown_to_html: Boolean(convertMarkdownToHtml),
+    output_root: outputRoot.trim() || null,
     catalog_parallel_workers: Math.max(
       1,
       Math.min(16, Number(catalogParallelWorkers) || 4),

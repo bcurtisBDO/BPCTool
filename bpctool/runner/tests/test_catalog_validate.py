@@ -228,6 +228,23 @@ def test_prevalidate_required_empty_when_applicable() -> None:
     assert "MSBPC.datatype" not in drafts[0].fields
 
 
+def test_removed_picklist_value_not_reported_again_as_required_empty() -> None:
+    drafts = [
+        WorkItemDraft(
+            key="m2",
+            parent_key=None,
+            work_item_type="Migration",
+            title="Vendors",
+            fields={"MSBPC.datatype": "Data processing"},
+            source_file="deliv.xlsx",
+            source_row=5,
+        )
+    ]
+    result = prevalidate_catalog_drafts(drafts, _ir(), _mapping(), sanitize=True)
+    assert result.counts.get("invalid_picklist_value") == 1
+    assert result.counts.get("required_empty") is None
+
+
 def test_prevalidate_applies_template_defaults_for_required_empty() -> None:
     drafts = [
         WorkItemDraft(
@@ -247,3 +264,149 @@ def test_prevalidate_applies_template_defaults_for_required_empty() -> None:
     assert result.defaults_applied == 3
     assert result.counts.get("defaults_applied") == 3
     assert result.counts.get("required_empty") is None
+
+
+def _ir_with_areas() -> dict:
+    ir = _ir()
+    ir["targets"] = {"project_name": "NewProj", "process_name": "P"}
+    ir["project"] = {
+        "area_paths": [
+            {"path": "Business process catalog\\Acquire to dispose"},
+            {"path": "Project name\\Functional areas\\Finance"},
+        ]
+    }
+    return ir
+
+
+def _draft(key: str, wit: str = "Scenario", **fields) -> WorkItemDraft:
+    return WorkItemDraft(
+        key=key,
+        parent_key=None,
+        work_item_type=wit,
+        title=key,
+        fields=dict(fields),
+        source_file="bpc.xlsx",
+        source_row=7,
+    )
+
+
+def test_project_name_placeholder_replaced_in_area_and_iteration_paths() -> None:
+    draft = _draft(
+        "a",
+        **{
+            "System.AreaPath": "Your Project Name Here\\Business process catalog",
+            "System.IterationPath": "<your project name here>\\Phase 1",
+        },
+    )
+    result = prevalidate_catalog_drafts([draft], _ir_with_areas(), _mapping())
+    assert draft.fields["System.AreaPath"] == "NewProj\\Business process catalog"
+    assert draft.fields["System.IterationPath"] == "NewProj\\Phase 1"
+    assert result.counts == {"project_placeholder_replaced": 2}
+    from app.catalog_validate import prevalidate_summary
+
+    kinds = [g["kind"] for g in prevalidate_summary(result)["automaticFixes"]]
+    assert kinds == ["project_placeholder_replaced"]
+
+
+def test_iteration_path_project_prefix_is_fixed_never_removed() -> None:
+    ir = _ir_with_areas()
+    ir["project"]["iteration_paths"] = [
+        {"path": "Phase 1 - Initiate"},
+        {"path": "Phase 1 - Initiate\\Sprint 1"},
+    ]
+    root_only = _draft("a", **{"System.IterationPath": "MSBPCProj"})
+    nested = _draft("b", **{"System.IterationPath": "MSBPCProj\\phase 1 - initiate\\Sprint 1"})
+    relative = _draft("c", **{"System.IterationPath": "Phase 1 - Initiate"})
+    already = _draft("d", **{"System.IterationPath": "NewProj\\Unknown sprint"})
+    result = prevalidate_catalog_drafts([root_only, nested, relative, already], ir, _mapping())
+    assert root_only.fields["System.IterationPath"] == "NewProj"
+    assert nested.fields["System.IterationPath"] == "NewProj\\Phase 1 - Initiate\\Sprint 1"
+    assert relative.fields["System.IterationPath"] == "NewProj\\Phase 1 - Initiate"
+    assert already.fields["System.IterationPath"] == "NewProj\\Unknown sprint"
+    assert result.counts == {"area_path_project_renamed": 3}
+
+
+def test_area_path_from_another_project_is_rewritten() -> None:
+    draft = _draft("a", **{"System.AreaPath": "OldProj\\Business process catalog\\Acquire to dispose"})
+    result = prevalidate_catalog_drafts([draft], _ir_with_areas(), _mapping())
+    assert draft.fields["System.AreaPath"] == "NewProj\\Business process catalog\\Acquire to dispose"
+    assert result.counts == {"area_path_project_renamed": 1}
+
+
+def test_area_path_ancestor_and_project_root_are_valid() -> None:
+    ancestor = _draft("a", **{"System.AreaPath": "NewProj\\functional areas"})
+    root = _draft("b", **{"System.AreaPath": "NewProj"})
+    result = prevalidate_catalog_drafts([ancestor, root], _ir_with_areas(), _mapping())
+    assert ancestor.fields["System.AreaPath"] == "NewProj\\Functional areas"
+    assert root.fields["System.AreaPath"] == "NewProj"
+    assert not result.issues
+
+
+def test_unknown_area_path_is_removed_and_reported_with_row() -> None:
+    draft = _draft("a", **{"System.AreaPath": "NewProj\\Supply chain\\Warehouse"})
+    result = prevalidate_catalog_drafts([draft], _ir_with_areas(), _mapping())
+    assert "System.AreaPath" not in draft.fields
+    issue = result.issues[0]
+    assert (issue.kind, issue.source_file, issue.source_row) == ("invalid_area_path", "bpc.xlsx", 7)
+
+
+def test_existing_project_area_is_accepted() -> None:
+    draft = _draft("a", **{"System.AreaPath": "NewProj\\Manual area"})
+    result = prevalidate_catalog_drafts(
+        [draft], _ir_with_areas(), _mapping(), extra_area_paths=["Manual area"]
+    )
+    assert draft.fields["System.AreaPath"] == "NewProj\\Manual area"
+    assert not result.issues
+
+
+def test_state_checked_against_live_states() -> None:
+    bad = _draft("a", **{"System.State": "Deprecated"})
+    good = _draft("b", **{"System.State": "active"})
+    result = prevalidate_catalog_drafts(
+        [bad, good], _ir(), _mapping(), allowed_states={"Scenario": ["New", "Active", "Closed"]}
+    )
+    assert "System.State" not in bad.fields
+    assert good.fields["System.State"] == "Active"
+    assert result.counts == {"invalid_state": 1, "state_case_normalized": 1}
+    from app.catalog_validate import prevalidate_summary
+
+    summary = prevalidate_summary(result)
+    assert [g["kind"] for g in summary["automaticFixes"]] == ["state_case_normalized"]
+
+
+def test_long_text_is_shortened() -> None:
+    from app.catalog_validate import MAX_STRING_LENGTH
+
+    mapping = _mapping()
+    menu = FieldDef(label="Menu path", reference_name="MSBPC.menupath", field_type="String")
+    mapping.fields_by_ref["msbpc.menupath"] = menu
+    long_products = "; ".join(["Business Central"] * 30)
+    draft = _draft(
+        "a", **{"MSBPC.menupath": "x" * 300, "MSBPC.products": long_products, "System.Title": "t" * 260}
+    )
+    result = prevalidate_catalog_drafts([draft], _ir(), mapping)
+    assert len(draft.fields["MSBPC.menupath"]) == MAX_STRING_LENGTH
+    assert draft.fields["MSBPC.menupath"].endswith("…")
+    products = draft.fields["MSBPC.products"]
+    assert len(products) <= MAX_STRING_LENGTH and products.endswith("Business Central")
+    assert len(draft.title) == MAX_STRING_LENGTH
+    assert result.counts["text_truncated"] == 3
+
+
+def test_summary_splits_review_and_automatic_and_csv(tmp_path) -> None:
+    from app.catalog_validate import prevalidate_summary, write_prevalidate_csv
+
+    drafts = [
+        _draft("a", **{"System.AreaPath": "OldProj\\Business process catalog"}),
+        _draft("b", **{"MSBPC.module": "Not a module"}),
+    ]
+    result = prevalidate_catalog_drafts(drafts, _ir_with_areas(), _mapping())
+    summary = prevalidate_summary(result)
+    assert [g["kind"] for g in summary["needsReview"]] == ["invalid_picklist_value"]
+    assert [g["kind"] for g in summary["automaticFixes"]] == ["area_path_project_renamed"]
+    assert summary["needsReviewTotal"] == 1
+    path = tmp_path / "checks.csv"
+    assert write_prevalidate_csv(result, path) == 2
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    assert lines[0].startswith("Needs review?,What happened,Source file,Row")
+    assert lines[1].startswith("Yes,Value is not in the picklist,bpc.xlsx,7,b")

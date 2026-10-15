@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
-from ..ado_client import AdoClient
+from ..ado_client import AdoClient, AdoError
 from ..catalog_import import load_catalog_drafts
 from ..catalog_runtime import (
     Progress,
@@ -18,8 +20,14 @@ from ..catalog_runtime import (
     load_id_map,
     load_id_map_parents,
 )
-from ..catalog_validate import prevalidate_catalog_drafts, prevalidate_summary
-from ..mapping import build_mapping_from_ir
+from ..catalog_validate import (
+    prevalidate_catalog_drafts,
+    prevalidate_summary,
+    write_prevalidate_csv,
+)
+from ..failure_explain import enrich_failures, summarize_failures, write_failures_csv
+from ..mapping import TemplateMapping, build_mapping_from_ir
+from ..run_outcome import catalog_placeholder_count, project_name_notice
 
 Emit = Callable[[str, str], None]
 
@@ -36,6 +44,7 @@ def apply_catalog(
     parallel_workers: int | None = None,
     progress: Progress | None = None,
     should_cancel: ShouldCancel | None = None,
+    run_id: str = "",
 ) -> dict[str, Any]:
     project = ir["targets"]["project_name"]
     catalog_dir = ir["source"].get("catalog_source_dir")
@@ -96,6 +105,7 @@ def apply_catalog(
     output_dir.mkdir(parents=True, exist_ok=True)
     id_map_path = output_dir / "ado-id-map.csv"
     failures_path = output_dir / "import-failures.json"
+    failures_csv_path = output_dir / "import-failures.csv"
     preview_path = output_dir / "import-preview.csv"
 
     # Always write a preview sample showing normalized rich text.
@@ -136,30 +146,41 @@ def apply_catalog(
         f"(Title 1..N outline / ADO CSV style)",
     )
 
-    pre = prevalidate_catalog_drafts(drafts, ir, mapping, sanitize=True)
+    extra_areas, allowed_states = ([], None) if dry_run else _live_project_context(
+        client, project, {d.work_item_type for d in drafts if d.fields.get("System.State")}, emit
+    )
+    pre = prevalidate_catalog_drafts(
+        drafts,
+        ir,
+        mapping,
+        sanitize=True,
+        project=project,
+        extra_area_paths=extra_areas,
+        allowed_states=allowed_states,
+    )
     summary = prevalidate_summary(pre)
     stats["prevalidate"] = summary
     prevalidate_path = output_dir / "import-prevalidate.json"
-    prevalidate_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    counts = summary.get("counts") or {}
-    if (
-        counts
-        or summary.get("fieldsStripped")
-        or summary.get("multiSelectNormalized")
-        or summary.get("defaultsApplied")
-    ):
-        parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+    prevalidate_csv = output_dir / "import-prevalidate.csv"
+    prevalidate_path.write_text(
+        json.dumps({**_run_stamp(run_id), **summary}, indent=2), encoding="utf-8"
+    )
+    write_prevalidate_csv(pre, prevalidate_csv)
+    placeholder_notice = project_name_notice(
+        project, template_rows=0, catalog_values=catalog_placeholder_count(summary)
+    )
+    if placeholder_notice:
+        emit("catalog", placeholder_notice)
+    if summary["needsReviewTotal"] or summary["automaticFixesTotal"]:
+        review = "; ".join(f"{g['label']}: {g['count']}" for g in summary["needsReview"]) or "none"
         emit(
             "catalog",
-            "Prevalidate: "
-            + (", ".join(parts) if parts else "ok")
-            + f"; stripped {summary.get('fieldsStripped', 0)} field values, "
-            f"defaults applied {summary.get('defaultsApplied', 0)}, "
-            f"normalized {summary.get('multiSelectNormalized', 0)} multi-select; "
-            f"wrote {prevalidate_path.name}",
+            f"Data checks: {summary['needsReviewTotal']} value(s) need review ({review}); "
+            f"{summary['automaticFixesTotal']} fixed automatically. "
+            f"Full list: {prevalidate_csv.name}",
         )
     else:
-        emit("catalog", f"Prevalidate: no issues ({prevalidate_path.name})")
+        emit("catalog", "Data checks: no issues found")
 
     if dry_run:
         existing = load_id_map(id_map_path)
@@ -193,7 +214,24 @@ def apply_catalog(
         should_cancel=should_cancel,
     )
     stats.update(create_stats)
-    failures_path.write_text(json.dumps(failures, indent=2), encoding="utf-8")
+    drafts_by_key = {draft.key: draft for draft in drafts}
+    enrich_failures(failures, drafts_by_key, label_for=_label_lookup(mapping))
+    failure_summary = summarize_failures(failures)
+    stats["failure_summary"] = failure_summary
+    failures_path.write_text(
+        json.dumps(
+            {**_run_stamp(run_id), "summary": failure_summary, "failures": failures}, indent=2
+        ),
+        encoding="utf-8",
+    )
+    write_failures_csv(failures, failures_csv_path)
+    if failures:
+        emit(
+            "catalog",
+            f"{failure_summary['rootCauses']} row(s) failed and blocked "
+            f"{failure_summary['blockedByParent']} child row(s); "
+            f"see {failures_csv_path.name}",
+        )
     stats["id_map_path"] = str(id_map_path)
 
     if should_cancel is not None and should_cancel():
@@ -228,3 +266,59 @@ def apply_catalog(
         + f", workers {workers}",
     )
     return stats
+
+
+def _run_stamp(run_id: str) -> dict[str, str]:
+    return {"runId": run_id, "generatedAt": datetime.now(timezone.utc).isoformat()}
+
+
+def _label_lookup(mapping: TemplateMapping):
+    builtin = {
+        "system.areapath": "Area path",
+        "system.iterationpath": "Iteration path",
+        "system.state": "State",
+        "system.title": "Title",
+    }
+
+    def label_for(ref: str) -> str:
+        fd = mapping.field_def(ref) if ref else None
+        return (fd.label if fd and fd.label else None) or builtin.get(ref.lower(), ref)
+
+    return label_for
+
+
+def _live_project_context(
+    client: AdoClient | None, project: str, state_wits: set[str], emit: Emit
+) -> tuple[list[str], dict[str, list[str]] | None]:
+    """Area paths already in the project and allowed states per work item type."""
+    if client is None:
+        return [], None
+    areas: list[str] = []
+    try:
+        root = client.get(
+            "/_apis/wit/classificationnodes/Areas?$depth=14", project=project, api_version="7.1"
+        ) or {}
+        stack = [(root, [])]
+        while stack:
+            node, parents = stack.pop()
+            path = [*parents, str(node.get("name") or "")] if parents or node is not root else []
+            if path:
+                areas.append("\\".join(path))
+            for child in node.get("children") or []:
+                stack.append((child, path))
+    except AdoError as exc:
+        emit("catalog", f"Could not read project area paths (checking against template only): {exc}")
+    states: dict[str, list[str]] = {}
+    for wit in sorted(state_wits):
+        try:
+            data = client.get(
+                f"/_apis/wit/workitemtypes/{quote(wit, safe='')}/states",
+                project=project,
+                api_version="7.1",
+            ) or {}
+            names = [str(item.get("name")) for item in data.get("value") or [] if item.get("name")]
+            if names:
+                states[wit] = names
+        except AdoError as exc:
+            emit("catalog", f"Could not read states for '{wit}' (not checked): {exc}")
+    return areas, states or None

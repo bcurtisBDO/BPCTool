@@ -1,6 +1,5 @@
 /**
  * Azure DevOps organization URL helpers (SaaS only).
- * Ported from NewADOToolkit normalizeAzureDevOpsOrgUrl patterns.
  */
 
 export function parseAdoOrgUrl(raw) {

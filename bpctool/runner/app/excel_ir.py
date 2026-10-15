@@ -264,6 +264,42 @@ def parse_area_paths(path: Path) -> list[dict[str, Any]]:
     return items
 
 
+PROJECT_NAME_PLACEHOLDER_RE = re.compile(
+    r"[<\[{(]?\s*your\s+project\s+name\s+here\s*[>\]})]?", re.IGNORECASE
+)
+
+
+def replace_project_placeholder(value: Any, project_name: str) -> Any:
+    """Swap the workbook's "Your Project Name Here" placeholder for the target project."""
+    if not isinstance(value, str) or not project_name.strip():
+        return value
+    return PROJECT_NAME_PLACEHOLDER_RE.sub(lambda _: project_name.strip(), value)
+
+
+def _apply_project_name(
+    areas: list[dict[str, Any]],
+    iterations: list[dict[str, str]],
+    teams: list[dict[str, str]],
+    project_name: str,
+) -> int:
+    """Replace the placeholder in place; returns the number of rows changed."""
+    replaced = 0
+    for items, keys in (
+        (areas, ("path", "default_segment")),
+        (iterations, ("path",)),
+        (teams, ("backlog_iteration",)),
+    ):
+        for item in items:
+            changed = False
+            for key in keys:
+                new = replace_project_placeholder(item.get(key), project_name)
+                if new != item.get(key):
+                    item[key] = new
+                    changed = True
+            replaced += changed
+    return replaced
+
+
 def parse_teams(path: Path) -> list[dict[str, str]]:
     rows = _sheet_rows(path, "Teams")
     if not rows:
@@ -517,6 +553,7 @@ def build_ir(
     iterations = parse_iteration_paths(path)
     areas = parse_area_paths(path)
     teams = parse_teams(path)
+    placeholders_replaced = _apply_project_name(areas, iterations, teams, project_name or "")
     backlogs = parse_backlogs(path)
     html_fields = [item for item in fields if item.get("is_html")]
     enabled_wits = [item for item in work_item_types if not item.get("disabled")]
@@ -546,6 +583,7 @@ def build_ir(
             "teams": teams,
             "area_paths": areas,
             "iteration_paths": iterations,
+            "project_placeholders_replaced": placeholders_replaced,
         },
         "catalog": catalog,
         "counts": {
