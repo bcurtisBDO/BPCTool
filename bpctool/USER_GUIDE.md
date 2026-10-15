@@ -428,9 +428,11 @@ If an older apply created custom **Levels** / **Lowest** while leaving system **
 
 ## 10. Spreadsheet deltas & fingerprints
 
-- **Workbook version** label + file bytes produce a fingerprint
-- Successful process applies can record the fingerprint in `localStorage` (`bpcWorkbookApplies`)
-- When the workbook changes for the same org/process, the UI surfaces that a spreadsheet delta update is appropriate
+**Workbook version** is a label for traceability and change detection. It does not change what is created or imported, and it is never written to Azure DevOps.
+
+- **Runner fingerprint** — a hash of the template file's contents plus the label (e.g. `sha256:39d2f0ca4f206785::2026-q4`). Shown at the top of Preview plan and as *Workbook fingerprint* in the HTML/JSON report, so you can tell which template and release a run used
+- **Browser check** — after a successful run, the browser records the template path and label for that org + process in `localStorage` (`bpcWorkbookApplies`). If either differs next time, Process & project names shows *New or changed spreadsheet detected*, and with **Require confirmation before update** a Page Layout run on the existing process asks for confirmation; otherwise it shows *Workbook matches the last applied revision*
+- The browser check compares path + label, not file contents: if you overwrite a template in place, change the label too (the runner fingerprint changes either way)
 
 **What a re-run actually updates** (updated spreadsheet ≠ full overwrite):
 

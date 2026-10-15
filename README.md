@@ -59,7 +59,7 @@ Defaults:
 
 - Folder root `~/BPC Files` (`BPCTOOL_CATALOG` to change); the newest release subfolder is selected.
 - Template: newest `ADO template guideline*.xlsx` in the release folder (or Browse… / `BPCTOOL_TEMPLATE`).
-- Workbook version: the release folder name (e.g. `2026-Q4`).
+- Workbook version: the release folder name (e.g. `2026-Q4`). A label only — it is never sent to Azure DevOps. It appears in the plan and report fingerprint, and a new label tells the UI a new spreadsheet is being applied to an existing process ([USER_GUIDE §10](./bpctool/USER_GUIDE.md#10-spreadsheet-deltas--fingerprints)).
 - Root area path: the project name.
 - `Your Project Name Here` in any workbook area or iteration path is replaced with the project name from the form, and reported in the results.
 - Run output folder: `BPCTOOL_OUTPUT_DIR`, else `bpctool/runner-out/`.
