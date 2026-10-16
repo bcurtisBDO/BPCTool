@@ -27,6 +27,7 @@ AUTOMATIC_FIX_KINDS = (
     "state_case_normalized",
     "area_path_project_renamed",
     "project_placeholder_replaced",
+    "duplicate_key_renamed",
 )
 # Values that were dropped, shortened or are still questionable — worth a look.
 REVIEW_KINDS = (
@@ -63,6 +64,11 @@ ISSUE_TEXT: dict[str, dict[str, str]] = {
     "area_path_project_renamed": {
         "label": "Area / iteration path pointed at another project name",
         "outcome": "The first part of the path was replaced with the target project name.",
+        "fix": "Nothing to do.",
+    },
+    "duplicate_key_renamed": {
+        "label": "Process sequence ID used by more than one row",
+        "outcome": "Each row is still imported; repeats are tracked by their Microsoft ID so none is skipped.",
         "fix": "Nothing to do.",
     },
     "invalid_area_path": {
@@ -286,6 +292,7 @@ def prevalidate_catalog_drafts(
             "System.IterationPath": "Iteration path",
             "System.State": "State",
             "System.Title": "Title",
+            "MSBPC.processsequenceid": "Process sequence ID",
         }.get(ref, ref)
 
     for draft in drafts:
@@ -310,6 +317,16 @@ def prevalidate_catalog_drafts(
                 )
             )
             result.bump(kind)
+
+        if draft.duplicate_of:
+            add(
+                "MSBPC.processsequenceid",
+                draft.duplicate_of,
+                "duplicate_key_renamed",
+                "normalize",
+                f"'{draft.duplicate_of}' is also on an earlier row; tracked as '{draft.key}'",
+                draft.key,
+            )
 
         for ref in ("System.AreaPath", "System.IterationPath"):
             original = draft.fields.get(ref)

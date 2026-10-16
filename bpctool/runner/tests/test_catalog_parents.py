@@ -7,6 +7,7 @@ from pathlib import Path
 from app.catalog_import import (
     WorkItemDraft,
     _fill_title_hierarchy_parents,
+    _make_keys_unique,
     load_catalog_drafts,
 )
 from app.excel_ir import build_ir
@@ -142,3 +143,38 @@ def test_catalog_parents_use_title_outline(template_path) -> None:
     d_linked = [d for d in deliverables if d.parent_key]
     assert len(d_linked) > 1000
     assert all(d.parent_key in by_key for d in d_linked)
+
+
+def test_repeated_key_gets_unique_key_and_own_children() -> None:
+    def row(key: str, level: int, microsoft_id: str, source_row: int) -> WorkItemDraft:
+        return WorkItemDraft(
+            key=key,
+            parent_key=None,
+            work_item_type="System process",
+            title=f"Row {source_row}",
+            fields={"MSBPC.microsoftid": microsoft_id},
+            source_file="bpc.xlsx",
+            source_row=source_row,
+            hierarchy_level=level,
+        )
+
+    drafts = [
+        row("10.05", 1, "m1", 2),
+        row("10.05.100", 2, "m2", 3),
+        row("10.05.100", 2, "m3", 4),
+        row("10.05.100.100", 3, "m4", 5),
+        row("10.05.100", 2, "", 6),
+    ]
+    _make_keys_unique(drafts, set())
+    _fill_title_hierarchy_parents(drafts)
+
+    assert [d.key for d in drafts] == [
+        "10.05",
+        "10.05.100",
+        "10.05.100#m3",
+        "10.05.100.100",
+        "10.05.100#bpc.xlsx:6",
+    ]
+    assert [d.duplicate_of for d in drafts] == ["", "", "10.05.100", "", "10.05.100"]
+    # The child row follows the repeated row above it, not the first one.
+    assert drafts[3].parent_key == "10.05.100#m3"

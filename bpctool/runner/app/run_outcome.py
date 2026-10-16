@@ -192,7 +192,11 @@ def build_outcome(
     earlier_steps: dict[str, str] | None = None,
     notices: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Headline, per-step sentences, prioritized attention items, and output files."""
+    """Headline, per-step sentences, prioritized attention items, and output files.
+
+    ``earlier_steps`` (step id → finishedAt) lists only steps that did not run this
+    time and whose results in ``step_results`` were carried over from an earlier run.
+    """
     earlier = earlier_steps or {}
     steps: list[dict[str, Any]] = []
     for step_id in STEP_TITLES:
@@ -307,6 +311,19 @@ def build_outcome(
         if review_total:
             parts.append(f"{_plural(review_total, 'value')} need review before the live run.")
         subline = " ".join(parts) or "Uncheck “Rehearsal only” and run again for the live run."
+    elif errors and "catalog" in earlier:
+        status = "attention"
+        headline = "Finished — problems from an earlier Catalog Import are still open"
+        stamp = earlier["catalog"][:16].replace("T", " ")
+        when = f"the Catalog Import on {stamp}" if stamp else "an earlier Catalog Import"
+        roots = failure_summary.get("rootCauses")
+        subline = (
+            f"The steps run this time finished. {_plural(roots, 'row')} from {when} "
+            f"still {'needs' if roots == 1 else 'need'} fixing; "
+            "then re-run Catalog Import."
+            if roots
+            else f"The steps run this time finished. See the items below from {when}."
+        )
     elif errors:
         status = "attention"
         if drafts:
@@ -316,7 +333,8 @@ def build_outcome(
         roots = failure_summary.get("rootCauses")
         if roots:
             subline = (
-                f"{_plural(roots, 'row')} need fixing; they blocked {n(failure_summary.get('blockedByParent'))} more. "
+                f"{_plural(roots, 'row')} {'needs' if roots == 1 else 'need'} fixing; "
+                f"{'it' if roots == 1 else 'they'} blocked {n(failure_summary.get('blockedByParent'))} more. "
                 "Fix them, then re-run Catalog Import — it skips items already imported."
             )
         else:

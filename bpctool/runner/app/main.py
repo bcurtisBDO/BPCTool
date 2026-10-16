@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import html
 import os
+import re
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from .excel_ir import build_ir, find_template_workbook
 from .fs_browser import list_directory, list_roots
@@ -113,6 +116,11 @@ def parse_ir(request: DryRunRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+_OUTPUT_LINK_RE = re.compile(
+    r'href="(' + "|".join(re.escape(name) for name in OUTPUT_FILES) + r')"'
+)
+
+
 @app.get("/outputs/{folder}/{name}")
 def output_file(
     folder: str,
@@ -130,7 +138,15 @@ def output_file(
     if path.parent.parent != base or not path.is_file():
         raise HTTPException(status_code=404, detail=f"{name} has not been written yet")
     if name.endswith(".html"):
-        return FileResponse(path, media_type="text/html; charset=utf-8")
+        if custom is None:
+            return FileResponse(path, media_type="text/html; charset=utf-8")
+        # Relative links to sibling outputs would lose ?root= and hit the default folder.
+        suffix = html.escape(f"?root={quote(str(custom))}")
+        page = _OUTPUT_LINK_RE.sub(
+            lambda match: f'href="{match.group(1)}{suffix}"',
+            path.read_text(encoding="utf-8"),
+        )
+        return HTMLResponse(page)
     media = "text/csv; charset=utf-8" if name.endswith(".csv") else "application/json"
     return FileResponse(path, media_type=media, filename=f"{folder}-{name}")
 

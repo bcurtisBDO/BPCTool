@@ -36,6 +36,8 @@ class WorkItemDraft:
     # Field refs that should be created with /multilineFieldsFormat = Markdown
     markdown_format_fields: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Set when another row already used this row's key; ``key`` was made unique.
+    duplicate_of: str = ""
 
 
 def load_catalog_drafts(
@@ -52,12 +54,16 @@ def load_catalog_drafts(
         raise FileNotFoundError(f"Catalog source folder not found: {root}")
 
     drafts: list[WorkItemDraft] = []
+    seen_keys: set[str] = set()
     for path in sorted(root.glob("*.xlsx")):
         if not is_catalog_source_file(path):
             continue
         drafts.extend(
             _drafts_from_workbook(
-                path, mapping, convert_markdown_to_html=convert_markdown_to_html
+                path,
+                mapping,
+                convert_markdown_to_html=convert_markdown_to_html,
+                seen_keys=seen_keys,
             )
         )
         if limit is not None and len(drafts) >= limit:
@@ -73,6 +79,7 @@ def _drafts_from_workbook(
     mapping: TemplateMapping,
     *,
     convert_markdown_to_html: bool = False,
+    seen_keys: set[str] | None = None,
 ) -> list[WorkItemDraft]:
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -101,10 +108,32 @@ def _drafts_from_workbook(
                 values, mapping, convert_markdown_to_html=convert_markdown_to_html
             )
         )
+    _make_keys_unique(drafts, set() if seen_keys is None else seen_keys)
     # Parent/child links follow Title 1..N columns (ADO CSV hierarchy), matching
     # https://learn.microsoft.com/dynamics365/guidance/business-processes/about-import-catalog-devops
     _fill_title_hierarchy_parents(drafts)
     return drafts
+
+
+def _make_keys_unique(drafts: list[WorkItemDraft], seen: set[str]) -> None:
+    """Give rows that repeat an earlier row's key (e.g. Process sequence ID) their own key.
+
+    The first row keeps the plain key so existing ``ado-id-map.csv`` entries still match.
+    Later rows use ``<key>#<Microsoft ID>`` (stable across releases), else the source row.
+    """
+    for draft in drafts:
+        if draft.key not in seen:
+            seen.add(draft.key)
+            continue
+        original = draft.key
+        microsoft_id = str(draft.fields.get("MSBPC.microsoftid") or "").strip()
+        suffix = microsoft_id if microsoft_id and microsoft_id != original else ""
+        candidate = f"{original}#{suffix}" if suffix else f"{original}#{draft.source_file}:{draft.source_row}"
+        while candidate in seen:
+            candidate = f"{candidate}+"
+        draft.key = candidate
+        draft.duplicate_of = original
+        seen.add(candidate)
 
 
 def _row_to_draft(

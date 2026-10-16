@@ -37,11 +37,38 @@ def test_outcome_explains_catalog_failures() -> None:
     outcome = build_outcome({"catalog": _catalog_with_failures()}, dry_run=False, output_dir=None)
     assert outcome["status"] == "attention"
     assert outcome["headline"] == "Finished with problems: 7 of 10 catalog items imported"
-    assert "1 row need fixing; they blocked 2 more" in outcome["subline"]
+    assert "1 row needs fixing; it blocked 2 more" in outcome["subline"]
     item = outcome["attention"][0]
     assert item["severity"] == "error" and item["file"] == "import-failures.csv"
     assert "2 child rows" in item["detail"]
     assert item["examples"] == ["bpc.xlsx row 5 (k) — Area path 'X' does not exist in the project."]
+
+
+def test_outcome_headline_says_when_catalog_problems_are_from_earlier_run() -> None:
+    outcome = build_outcome(
+        {"teams": {"teams": 2}, "catalog": _catalog_with_failures()},
+        dry_run=False,
+        output_dir=None,
+        earlier_steps={"catalog": "2026-10-14T09:30:00+00:00"},
+    )
+    assert outcome["headline"] == "Finished — problems from an earlier Catalog Import are still open"
+    assert "1 row from the Catalog Import on 2026-10-14 09:30 still needs fixing" in outcome["subline"]
+
+
+def test_summary_headline_for_catalog_rerun_vs_other_steps(tmp_path) -> None:
+    def run(step_results: dict, run_id: str) -> dict:
+        return write_run_summary(
+            _ir(), step_results=step_results, output_dir=tmp_path,
+            org_url="https://dev.azure.com/o", dry_run=False, run_id=run_id,
+        )
+
+    run({"catalog": _catalog_with_failures()}, "run1")
+    # Catalog Import ran again and still failed: this run's problems, not earlier ones.
+    rerun = run({"catalog": _catalog_with_failures()}, "run2")
+    assert rerun["headline"] == "Finished with problems: 7 of 10 catalog items imported"
+    # Only Teams ran: the open catalog failures come from the earlier run.
+    teams_only = run({"teams": {"teams": 2}}, "run3")
+    assert teams_only["headline"] == "Finished — problems from an earlier Catalog Import are still open"
 
 
 def test_outcome_success_and_rehearsal() -> None:
@@ -133,9 +160,15 @@ def test_outputs_endpoint_serves_from_user_selected_root(tmp_path, monkeypatch) 
     chosen = tmp_path / "chosen"
     folder = chosen / "org_Proj"
     folder.mkdir(parents=True)
-    (folder / "bpc-ado-setup-summary.html").write_text("<html></html>", encoding="utf-8")
-    response = output_file("org_Proj", "bpc-ado-setup-summary.html", root=str(chosen))
-    assert str(response.path) == str((folder / "bpc-ado-setup-summary.html").resolve())
+    (folder / "import-failures.csv").write_text("Status\n", encoding="utf-8")
+    (folder / "bpc-ado-setup-summary.html").write_text(
+        '<a href="import-failures.csv">x</a> <a href="https://example.com/">y</a>', encoding="utf-8"
+    )
+    response = output_file("org_Proj", "import-failures.csv", root=str(chosen))
+    assert str(response.path) == str((folder / "import-failures.csv").resolve())
+    page = output_file("org_Proj", "bpc-ado-setup-summary.html", root=str(chosen)).body.decode()
+    assert f'href="import-failures.csv?root={chosen}"' in page
+    assert 'href="https://example.com/"' in page
     with pytest.raises(HTTPException):
         output_file("org_Proj", "bpc-ado-setup-summary.html", root=None)
     with pytest.raises(HTTPException):

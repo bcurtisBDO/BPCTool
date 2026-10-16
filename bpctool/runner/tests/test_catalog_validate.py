@@ -221,6 +221,24 @@ def test_prevalidate_flags_several_values_in_single_select() -> None:
     assert "2 values in single-select 'Module'; not in picklist: Acounts payable" in details
 
 
+def test_prevalidate_reports_repeated_key_as_automatic_fix() -> None:
+    draft = WorkItemDraft(
+        key="10.05.100#m3",
+        parent_key=None,
+        work_item_type="Process",
+        title="Second row with the same ID",
+        fields={},
+        source_file="bpc.xlsx",
+        source_row=4,
+        duplicate_of="10.05.100",
+    )
+    result = prevalidate_catalog_drafts([draft], _ir(), _mapping(), sanitize=True)
+    assert result.counts.get("duplicate_key_renamed") == 1
+    issue = result.issues[0]
+    assert issue.field_label == "Process sequence ID"
+    assert issue.new_value == "10.05.100#m3"
+
+
 def test_prevalidate_normalizes_picklist_casing() -> None:
     """Catalog title-case vs template sentence-case (Module)."""
     drafts = [
