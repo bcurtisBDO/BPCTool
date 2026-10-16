@@ -227,7 +227,7 @@ def test_prevalidate_reports_repeated_key_as_automatic_fix() -> None:
         parent_key=None,
         work_item_type="Process",
         title="Second row with the same ID",
-        fields={},
+        fields={"MSBPC.processsequenceid": "10.05.100"},
         source_file="bpc.xlsx",
         source_row=4,
         duplicate_of="10.05.100",
@@ -235,8 +235,10 @@ def test_prevalidate_reports_repeated_key_as_automatic_fix() -> None:
     result = prevalidate_catalog_drafts([draft], _ir(), _mapping(), sanitize=True)
     assert result.counts.get("duplicate_key_renamed") == 1
     issue = result.issues[0]
-    assert issue.field_label == "Process sequence ID"
+    assert issue.field_label == "Tracking key (ado-id-map.csv)"
+    assert issue.value == "10.05.100"
     assert issue.new_value == "10.05.100#m3"
+    assert draft.fields["MSBPC.processsequenceid"] == "10.05.100"
 
 
 def test_prevalidate_normalizes_picklist_casing() -> None:

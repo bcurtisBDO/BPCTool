@@ -18,6 +18,8 @@ _INVALID_AREA_MARKERS = frozenset({"not found", "n/a", "na", "none", "#n/a"})
 _PROJECT_PLACEHOLDERS = frozenset({"project name", "project", "your project name here"})
 # Azure DevOps single-line string / picklist-string fields reject values over 255.
 MAX_STRING_LENGTH = 255
+# Not an Azure DevOps field: the row key BPCTool records in ado-id-map.csv.
+TRACKING_KEY_REF = "Key"
 _STRING_FIELD_TYPES = frozenset({"string", "pickliststring", "picklist string", "picklist (string)"})
 
 # Changes the runner makes on the user's behalf that need no review.
@@ -68,7 +70,10 @@ ISSUE_TEXT: dict[str, dict[str, str]] = {
     },
     "duplicate_key_renamed": {
         "label": "Process sequence ID used by more than one row",
-        "outcome": "Each row is still imported; repeats are tracked by their Microsoft ID so none is skipped.",
+        "outcome": (
+            "Each row is still imported with its Process sequence ID unchanged. BPCTool tracks "
+            "the repeat under a separate key in ado-id-map.csv so it isn't skipped."
+        ),
         "fix": "Nothing to do.",
     },
     "invalid_area_path": {
@@ -292,7 +297,7 @@ def prevalidate_catalog_drafts(
             "System.IterationPath": "Iteration path",
             "System.State": "State",
             "System.Title": "Title",
-            "MSBPC.processsequenceid": "Process sequence ID",
+            TRACKING_KEY_REF: "Tracking key (ado-id-map.csv)",
         }.get(ref, ref)
 
     for draft in drafts:
@@ -320,11 +325,12 @@ def prevalidate_catalog_drafts(
 
         if draft.duplicate_of:
             add(
-                "MSBPC.processsequenceid",
+                TRACKING_KEY_REF,
                 draft.duplicate_of,
                 "duplicate_key_renamed",
                 "normalize",
-                f"'{draft.duplicate_of}' is also on an earlier row; tracked as '{draft.key}'",
+                f"Process sequence ID '{draft.duplicate_of}' is also on an earlier row. The work item "
+                f"keeps it; ado-id-map.csv tracks this row as '{draft.key}'",
                 draft.key,
             )
 
