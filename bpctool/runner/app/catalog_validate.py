@@ -336,6 +336,14 @@ def prevalidate_catalog_drafts(
             TRACKING_KEY_REF: "Tracking key (ado-id-map.csv)",
         }.get(ref, ref)
 
+    required_msbpc = [
+        (fd, normalize(fd.label))
+        for fd in mapping.fields_by_ref.values()
+        if _is_required(fd.required)
+        and fd.reference_name
+        and fd.reference_name.lower().startswith("msbpc.")
+    ]
+
     for draft in drafts:
         wit_norm = normalize(draft.work_item_type)
         # Refs whose value was removed above; don't report them again as "required empty".
@@ -438,7 +446,8 @@ def prevalidate_catalog_drafts(
                             area_text,
                             "area_path_project_renamed",
                             "normalize",
-                            f"'{parts[0]}' → '{project}'",
+                            f"'{parts[0]}' → '{project}'"
+                            + (f", placed under Root area path '{root_label}'" if rooted else ""),
                             target,
                         )
                     elif rooted:
@@ -631,14 +640,10 @@ def prevalidate_catalog_drafts(
         # only when WIT matrix marks the field applicable.
         applicable = mapping.applicable_fields_by_wit.get(wit_norm)
         if applicable:
-            for fd in mapping.fields_by_ref.values():
-                if not _is_required(fd.required):
-                    continue
-                if normalize(fd.label) not in applicable:
+            for fd, label_key in required_msbpc:
+                if label_key not in applicable:
                     continue
                 ref = fd.reference_name
-                if not ref or not ref.lower().startswith("msbpc."):
-                    continue
                 if draft.fields.get(ref) not in (None, ""):
                     continue
                 default = _template_default(fd) if sanitize else None

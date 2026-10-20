@@ -509,15 +509,31 @@ class AdoClient:
         data = self.post("/_apis/wit/wiql", {"query": query}, project=project) or {}
         return [int(item["id"]) for item in data.get("workItems") or [] if "id" in item]
 
+    WIQL_PAGE = 10000
+
     def find_work_items_with_field(self, project: str, work_item_type: str, field_ref: str) -> list[int]:
-        """IDs of items of one type with ``field_ref`` set (WIQL caps a query at 20,000 results)."""
-        query = (
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project"
-            f" AND [System.WorkItemType] = {_wiql_literal(work_item_type)}"
-            f" AND [{field_ref}] <> ''"
-        )
-        data = self.post("/_apis/wit/wiql", {"query": query}, project=project) or {}
-        return [int(item["id"]) for item in data.get("workItems") or [] if "id" in item]
+        """IDs of items of one type with ``field_ref`` set, read in ID order a page at a time.
+
+        A WIQL query fails outright above 20,000 results, so each page asks for the next
+        ``WIQL_PAGE`` IDs after the last one seen.
+        """
+        ids: list[int] = []
+        last = 0
+        while True:
+            query = (
+                "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project"
+                f" AND [System.WorkItemType] = {_wiql_literal(work_item_type)}"
+                f" AND [{field_ref}] <> ''"
+                f" AND [System.Id] > {last} ORDER BY [System.Id]"
+            )
+            data = self.post(
+                f"/_apis/wit/wiql?$top={self.WIQL_PAGE}", {"query": query}, project=project
+            ) or {}
+            page = [int(item["id"]) for item in data.get("workItems") or [] if "id" in item]
+            ids.extend(page)
+            if len(page) < self.WIQL_PAGE:
+                return ids
+            last = max(page)
 
     def get_parent_id(self, project: str, work_item_id: int) -> int | None:
         """Return Hierarchy-Reverse parent id, or None if unlinked."""

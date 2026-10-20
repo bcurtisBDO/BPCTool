@@ -117,6 +117,11 @@ def describe_step(step_id: str, result: dict[str, Any], *, dry_run: bool) -> tup
             + _warning_note(result)
         )
     if step_id == "project":
+        if result.get("existed") and result.get("description_error"):
+            return "warning", (
+                "Project already existed — kept, but its description could not be updated: "
+                f"{result['description_error']}"
+            )
         if result.get("existed"):
             return "ok", "Project already existed — kept" + (
                 ", description updated." if result.get("description_updated") else "."
@@ -336,7 +341,7 @@ def build_outcome(
                 "severity": "error",
                 "title": f"{_plural(group['count'], 'row')}: {group['label']}{catalog_note}",
                 "detail": (
-                    f"These rows were not imported"
+                    "These rows were not imported"
                     + (f", and {_plural(blocked, 'child row')} under them were blocked." if blocked else ".")
                 ),
                 "fix": group.get("fix", ""),

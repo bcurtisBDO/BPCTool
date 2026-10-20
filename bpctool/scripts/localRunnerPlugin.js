@@ -2,9 +2,10 @@
  * Vite plugin: start/stop the local FastAPI runner with the UI so users do not
  * need a second terminal (`npm run runner`).
  *
- * (Re)starts an owned uvicorn with --reload so writer/code changes are picked
- * up. An idle BPCTool runner on :8787 is replaced; one with a run in progress
- * is reused, and an unrelated program on the port is left alone.
+ * (Re)starts an owned uvicorn on each launch so code changes are picked up
+ * (`npm run dev` adds --reload). An idle BPCTool runner on :8787 is replaced;
+ * one with a run in progress is reused, and an unrelated program on the port
+ * is left alone.
  */
 import { execSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -236,8 +237,8 @@ export function localRunnerPlugin() {
       return
     }
     if (listener) {
-      // A runner from an earlier session would serve old writer code without --reload. Older
-      // builds can't report runs in progress; keeping them would hide every later fix.
+      // A runner from an earlier session would serve that session's code. Older builds can't
+      // report runs in progress; keeping them would hide every later fix.
       logger.info?.(
         listener.activeJobs === null
           ? `[bpc-runner] Replacing a BPCTool runner from an older version on :${PORT} (it can't report runs in progress)`
@@ -261,7 +262,10 @@ export function localRunnerPlugin() {
       )
     }
 
-    logger.info?.(`[bpc-runner] Starting ${uvicorn} on ${HOST}:${PORT} (--reload)`)
+    // --reload restarts the runner on any code change, killing a run in progress (e.g. a
+    // git pull mid-import), so only `npm run dev` uses it.
+    const reload = process.env.npm_lifecycle_event === 'dev'
+    logger.info?.(`[bpc-runner] Starting ${uvicorn} on ${HOST}:${PORT}${reload ? ' (--reload)' : ''}`)
     child = spawn(
       uvicorn,
       [
@@ -270,9 +274,7 @@ export function localRunnerPlugin() {
         HOST,
         '--port',
         String(PORT),
-        '--reload',
-        '--reload-dir',
-        'app',
+        ...(reload ? ['--reload', '--reload-dir', 'app'] : []),
       ],
       {
         cwd: RUNNER_DIR,

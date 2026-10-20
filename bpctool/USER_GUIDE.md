@@ -145,7 +145,7 @@ npm start        # UI + auto-started runner; opens browser
 | Double-click `Start BPCTool.command` / `.bat` | Setup if needed → start UI → auto-start runner → open browser |
 | `npm start` | Same as above; if `.venv` is missing (fresh clone or copy) it runs the Python part of setup first, logged as `[bpc-setup]` lines |
 
-The Vite process starts the FastAPI runner on `127.0.0.1:8787` via `scripts/localRunnerPlugin.js` (with `--reload`). An idle BPCTool runner already on `8787` (e.g. left over from an earlier session) is replaced; one with a run in progress is reused as-is so the run isn't cut off — relaunch after it finishes to load code changes. If a different program owns `8787`, the launcher leaves it alone and logs *Port 8787 is in use by another program*. Closing the start window / stopping Vite also stops the runner it started.
+The Vite process starts the FastAPI runner on `127.0.0.1:8787` via `scripts/localRunnerPlugin.js`. It does not watch for code changes, so pulling new code during a run can't restart the runner and cut the run off; relaunch to load the new code (developers: `npm run dev` adds `--reload`). An idle BPCTool runner already on `8787` (e.g. left over from an earlier session) is replaced; one with a run in progress is reused as-is so the run isn't cut off — relaunch after it finishes to load code changes. If a different program owns `8787`, the launcher leaves it alone and logs *Port 8787 is in use by another program*. Closing the start window / stopping Vite also stops the runner it started.
 
 Confirm health (optional):
 
@@ -299,7 +299,7 @@ Tick **Rehearsal only**, click **Rehearse selected flow**, and inspect the resul
 
 ### 2. Process & project names
 
-Free-text names for create or update, optional **project description**, and update policy. Existing targets are assessed against the lists loaded from the connection. The confirm rules only apply to steps that change that target: the process for Process Template / Page Layout, the project for Project Creation — so a Teams, Backlog or Catalog re-run isn't blocked by an existing project.
+Free-text names for create or update, optional **project description**, and update policy. Existing targets are assessed against the lists loaded from the connection. The confirm rules only apply to steps that change that target: the process for Process Template, Page Layout and Backlog (backlog levels belong to the process, so every project on it sees the change), the project for Project Creation — so a Teams, Backlog or Catalog re-run isn't blocked by an existing project, but a Backlog re-run against an existing process needs **Confirm process update** (and is refused under *create-only*).
 
 ### 3. Workflow selection
 
@@ -307,7 +307,7 @@ Four run mode radios (Selected step only, Dependency-aware, Run from selected st
 
 ### 4. Run configuration
 
-Template/catalog paths (Browse…), **Run output folder** (Browse… / Use default; remembered in the browser), workbook version, **Catalog workers** (labelled **Threads** in Simulate/API), root area path, **Rehearsal only**, markdown conversion, **Import Deprecated / Deleted rows**, **Preview plan** (plan preview with data checks), **Run selected flow (live)** / **Rehearse selected flow**, live/rehearsal note, catalog progress bar, **results card**, event log. Retry count and layout/backlog worksheet names only appear in Simulate/API modes; the runner reads sheet names from the template and handles retries itself.
+Template/catalog paths (Browse…), **Run output folder** (Browse… / Use default; remembered in the browser), workbook version, **Catalog workers** (labelled **Threads** in Simulate/API; also how many teams Backlog configures at once), root area path, **Rehearsal only**, markdown conversion, **Import Deprecated / Deleted rows**, **Preview plan** (plan preview with data checks), **Run selected flow (live)** / **Rehearse selected flow**, live/rehearsal note, catalog progress bar, **results card**, event log. Retry count and layout/backlog worksheet names only appear in Simulate/API modes; the runner reads sheet names from the template and handles retries itself.
 
 The layout uses a wide content shell and full-width rows for long values (paths, PAT, org URL) so fields are not clipped beside unused white space.
 
@@ -373,9 +373,9 @@ Project (and later project-phase steps) cannot start until process + layout succ
 |------|----|--------------|
 | 1. Process Template | `process` | Create/update inherited process; WITs; picklists; custom fields; multi-select → suggested lists; disable Excel-disabled WITs |
 | 2. Page Layout | `layout` | Add fields to WITs; pages/groups/controls; `HtmlFieldControl` for HTML; DevLabs multivalue control for Multi-select; `H` fields added without a visible control (skips disabled WITs) |
-| 3. Project Creation | `project` | Create project bound to process (or reuse existing); set/update optional description |
-| 4. Teams & Areas | `teams` | Create teams; area path tree; aggregate team area assignments (`includeChildren: false` unless Excel says otherwise) |
-| 5. Backlog Config | `backlog` | Rename/create backlog levels; assign WITs; set defaults; iteration paths; team backlog/iteration settings |
+| 3. Project Creation | `project` | Create project bound to process (or reuse existing); set/update optional description (a failed update is a warning; the run continues) |
+| 4. Teams & Areas | `teams` | Create teams; area path tree; aggregate team area assignments (`includeChildren` from the Teams sheet *Include sub areas*) |
+| 5. Backlog Config | `backlog` | Rename/create backlog levels; assign WITs; set defaults; iteration paths; team backlog/iteration settings (teams in parallel, **Catalog workers**) |
 | 6. Catalog Import | `catalog` | Import **all** matching catalog workbooks; Title 1..N parents; prevalidate; parallel create + resume + parent-link backfill |
 | 7. Report | `report` | Write HTML/JSON summary under the run output folder (the summary is also written automatically at the end of every run) |
 
@@ -386,7 +386,7 @@ Project (and later project-phase steps) cannot start until process + layout succ
 | **Work item types** | WIT definitions; `Custom work item type = Disabled` for Epic / Feature / User story; `Backlog name` maps enabled WITs to levels; field-label grid: **`X`** = field on the WIT and shown on the form; **`H`** = field on the WIT but **hidden** from the form (no control placed; an existing control, e.g. Completed Work on Task, is set hidden); blank = not on the WIT. The reference Script 2 ignored `H`; changing a cell from `H` to `X` shows the control again on the next Layout run. A **State** grid column (if present) means the State *field* applies to that WIT — it is **not** a list of allowed `System.State` values |
 | **Backlogs** | Level names, type, color, default WIT, **Rename from** (`Epic`, `Feature`, `(new)`, `(rename)`) |
 | **Fields** / **Picklists** | Custom fields and lists; **Multi-select field = Yes** → suggested picklist + multivalue UI (Application family, Products, Industries, …) |
-| **Area paths** / **Teams** | Hierarchy + team mappings (L1–L4 hierarchy columns; project column skipped) |
+| **Area paths** / **Teams** | Hierarchy + team mappings (L1–L4 hierarchy columns; project column skipped). Teams **Include sub areas** = Yes → the team's areas include their child areas (set by Teams & areas, so a Teams-only re-run keeps it) |
 | **Iteration paths** | Iteration tree created and assigned to teams in the backlog step |
 
 ### Catalog Import (step 6) in detail
@@ -500,7 +500,7 @@ When the project exists, the data checks also use its area paths and states, as 
 | In Azure DevOps, not in the workbook | Imported earlier (or, when matched by Microsoft ID, has a Microsoft ID) but no workbook row matches. Not listed when the rehearsal was row-limited (`catalog_limit`) |
 | New row — a live run would create it | A workbook row that matches no existing item |
 
-Only fields the workbook fills are compared; an empty cell is never reported. Formatting differences that Azure DevOps introduces aren't reported either: HTML markup and entities, number formats (`3` vs `3.0`), multi-select and tag order and case, area/iteration path case, identities (compared by e-mail), booleans (`Yes` vs `true`), and date-time vs date. The report is information only: a live Catalog Import still only creates new items and skips the ones listed in `ado-id-map.csv`. If Azure DevOps can't be read (for example an expired PAT), the rehearsal still finishes and the section says why the comparison was skipped. A single WIQL query returns at most 20,000 items, so matching by Microsoft ID fails (and says so) if one work item type has more than that.
+Only fields the workbook fills are compared; an empty cell is never reported. Formatting differences that Azure DevOps introduces aren't reported either: HTML markup and entities, number formats (`3` vs `3.0`), multi-select and tag order and case, area/iteration path case, identities (compared by e-mail), booleans (`Yes` vs `true`), and date-time vs date. The report is information only: a live Catalog Import still only creates new items and skips the ones listed in `ado-id-map.csv`. If Azure DevOps can't be read (for example an expired PAT), the rehearsal still finishes and the section says why the comparison was skipped. Matching by Microsoft ID reads 10,000 work item IDs per query, so types with more than Azure DevOps' 20,000-per-query limit are still matched in full.
 
 **Results card.** When a run finishes, the UI shows a card under the run log with the headline, buttons to open the report and download the CSVs (served by the runner at `GET /outputs/{folder}/{file}`; only the files above), **What needs attention** (largest problems first, with example rows and the fix), a step list, and the automatic fixes. If catalog rows failed, **Set up Catalog Import re-run** selects Catalog Import as a single live step — `ado-id-map.csv` makes the re-run skip everything already created.
 
@@ -565,9 +565,9 @@ The runner has no login, so it only answers requests addressed to `127.0.0.1` or
 | `apply_dry_run` | With `mode=apply`, run writers without ADO changes — UI **Rehearsal only**. Catalog Import makes read-only calls (project lookup; area paths, states and work items when the project exists) |
 | `convert_markdown_to_html` | Convert markdown-like text to HTML; default `false` (preserve markdown) |
 | `include_deprecated_deleted` | Import catalog rows whose Catalog status is Deprecated or Deleted (and rows below them); default `false` skips them. Also accepted by `POST /plan/dry-run` |
-| `steps` | Optional subset, e.g. `["backlog"]` or `["catalog","report"]` |
+| `steps` | Optional subset, e.g. `["backlog"]` or `["catalog","report"]`; always run in engine order. `null` runs every step; an empty list or an unknown step name is rejected (HTTP 422) |
 | `catalog_limit` | Cap drafts for smoke tests |
-| `catalog_parallel_workers` | Parent-aware Catalog Import and backfill workers (1–16; UI **Catalog workers**; default 4) |
+| `catalog_parallel_workers` | Parent-aware Catalog Import and backfill workers, also used for Backlog team settings (1–16; UI **Catalog workers**; default 4) |
 | `root_area_path` | Defaults to project name when omitted/empty in the UI |
 | `output_root` | Absolute folder for run outputs (UI **Run output folder**); results go to `<output_root>/<org>_<project>/`. Omit / `null` for `BPCTOOL_OUTPUT_DIR`, else `bpctool/runner-out` |
 
@@ -608,7 +608,7 @@ React UI (Vite)
   ├─ /extmgmt-proxy   → Extension Management (Multivalue check/install)
   ├─ /fs              → Local filesystem browser
   └─ /api             → Local runner :8787
-                      ├─ excel_ir.py         Excel → IR (keeps disabled WITs)
+                      ├─ excel_ir.py         Excel → IR (keeps disabled WITs); catalog sheet cache
                       ├─ planner.py          IR → plan (Preview plan)
                       ├─ richtext.py         HTML detect / optional MD→HTML
                       ├─ catalog_import.py   Drafts, Title 1..N parents, multiline flags
@@ -638,7 +638,7 @@ Key design rules:
 - Multi-select uses suggested-picklist + DevLabs Multivalue control pattern
 - Empty Description is omitted (not invented)
 - No subprocess calls to the reference scripts
-- Launcher replaces an idle BPCTool runner on `:8787` (reuses one with a run in progress) and starts uvicorn with `--reload`
+- Launcher replaces an idle BPCTool runner on `:8787` (reuses one with a run in progress) and starts uvicorn (with `--reload` only under `npm run dev`)
 - One rehearsal/live run per org + project at a time
 - Rehearsals never write to Azure DevOps: writers get no client, and Catalog Import's reads go through a client that refuses every write
 
@@ -658,7 +658,7 @@ npm run lint
 npm run build
 ```
 
-Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation, team iterations / backlogIteration GUID, org URL normalize, layout booleans / multivalue control type, project description, Title-outline catalog parents, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), concurrent-run lock, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward).
+Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation (team names ignoring case, *Include sub areas*, one area-tree read), team iterations / backlogIteration GUID and parallel team settings, org URL normalize, layout (boolean fallback payloads after a 400, one fields + form read per type, multivalue control type), project description (failure → warning), Title-outline catalog parents, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), step-name validation and the update policy for process / layout / backlog, concurrent-run lock, job cancel / PAT cleared / retention, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward), the existing-target gates, and the runner-unreachable message.
 
 ---
 
@@ -757,6 +757,8 @@ You likely converted incorrectly, or multiline format was not applied:
 
 Some inherited WIT layouts can be locked. Check runner events for layout warnings. Ensure process step created/customized WITs before layout.
 
+A field Azure DevOps won't add to a type is logged as `Add field <ref> on <type>: …` (`Add boolean field …` for booleans, after the fallback payloads were tried too), counted as a warning, and gets no control. Fix the field in the template Fields sheet (type, default, required) and re-run **Page Layout**.
+
 ### Project create hangs
 
 ADO project creation is asynchronous. The runner polls for several seconds. If it times out, verify the project in the org UI and rerun with **skip-existing** or **always-update**.
@@ -776,7 +778,7 @@ A rehearsal never changes Azure DevOps. Its Catalog Import step looks up the pro
 ### Teams step reported 0 assignments / Areas show no Teams
 
 1. Confirm **Rehearsal only** is **unchecked** for a live run (button reads **Run selected flow (live)**). A rehearsal never PATCHes `teamfieldvalues` (event log will say `No Azure DevOps teamfieldvalues were changed`).
-2. Quit and relaunch Start BPCTool / `npm start` after pulling code changes — the UI replaces an idle BPCTool runner on port `8787` and starts the runner with `--reload` (a runner with a run in progress is kept until that run finishes).
+2. Quit and relaunch Start BPCTool / `npm start` after pulling code changes — the UI replaces an idle BPCTool runner on port `8787` and starts a new one on the current code (a runner with a run in progress is kept until that run finishes).
 3. Re-run the **Teams & areas** card only. The log should show many `Assigned team '…' → …` lines and finish with `N team area assignments` (fixture ≈ 47).
 
 ### Team iteration paths empty in Azure DevOps
@@ -856,6 +858,7 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 ## 16. Security notes
 
 - PAT is kept in **sessionStorage** only (not persisted to disk)
+- The runner holds a job's PAT in memory only while the job runs and drops it when the job ends; it never writes or logs it
 - Prefer least-privilege PATs and rotate after bulk imports; extension install needs org extension-management rights
 - Runner binds to `127.0.0.1` by default (local only), accepts only `Host: 127.0.0.1` / `localhost`, and sends no CORS headers, so other web pages can't call it
 - A rehearsal uses the PAT for reads only (project lookup, area paths, states, work items); its client refuses every other request
@@ -874,11 +877,11 @@ Completion is stored per org/process/project key in `localStorage`. Use **Clear 
 - Deprecated / Deleted rows are recognized only by the words *Deprecated* or *Deleted* in **Catalog status**; skipping a row never closes or removes a work item an earlier run created (a rehearsal lists those items)
 - Catalog import of ~15k rows (all matching workbooks) is long-running; use a **Rehearsal only** run + `catalog_limit` for smoke tests; tune **Catalog workers** (2–8 typical)
 - Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links. Updated spreadsheet rows do **not** refresh existing work item fields; a **Rehearsal only** run lists them (`import-changes.csv`)
-- The rehearsal change report matches rows without `ado-id-map.csv` by Microsoft ID only, for the work item types in the workbook; one WIQL query returns at most 20,000 items per type
+- The rehearsal change report matches rows without `ado-id-map.csv` by Microsoft ID only, for the work item types in the workbook
 - Catalog still uses one REST create per work item (parent-aware parallel, keep-alive connections); no WIT `$batch`
 - Backfill trusts `ParentId` recorded in `ado-id-map.csv`; a parent changed by hand in ADO after create is not re-checked for those rows (a rehearsal reports it as *Parent differs*)
 - Only Hierarchy-Reverse parent links are created (same as the reference scripts — no Related / Predecessor, etc.)
-- Job store is in-memory; restarting the runner clears job history (and anything to reattach to after a page refresh)
+- Job store is in-memory; restarting the runner clears job history (and anything to reattach to after a page refresh). It keeps the 20 most recent finished jobs; polling an older job id returns 404
 - Cancel is cooperative: a single long ADO request (e.g. one layout call) finishes before the job stops
 - Some inherited layout surfaces can reject control updates; check layout warnings in the event log
 - Re-running Process may log `Field 'MSBPC.*' warning: ADO 404` when org-scoped fields already exist (Update API is lock/undelete only); fields remain usable — Layout binds them to WITs

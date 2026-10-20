@@ -52,6 +52,9 @@ def apply_project(
                 stats["description_updated"] = True
                 emit("project", f"Updated project description ({len(description)} chars)")
             except AdoError as exc:
+                # A warning, not a failure: Teams, Backlog and Catalog Import don't depend on it.
+                stats["description_error"] = str(exc)
+                stats["warnings"] = 1
                 emit("project", f"WARNING: Could not update project description: {exc}")
         return stats
 

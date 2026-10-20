@@ -97,6 +97,23 @@ def test_existing_project_updates_description_when_provided() -> None:
     assert client.created is None
 
 
+def test_failed_description_update_is_a_step_warning() -> None:
+    from app.run_outcome import describe_step
+
+    class DescriptionRefused(FakeClient):
+        def update_project_description(self, project_id: str, description: str) -> None:
+            raise AdoError("ADO 403 Forbidden: no permission", status=403)
+
+    client = DescriptionRefused(existing_id="proj-existing")
+    ir = {"targets": {"project_name": "MSBPCProj", "process_name": "MSBPCTemplate", "project_description": "New"}}
+    stats = apply_project(client, ir, dry_run=False, emit=lambda _s, _m: None)
+    assert stats["description_updated"] is False
+    assert stats["warnings"] == 1
+    status, text = describe_step("project", stats, dry_run=False)
+    assert status == "warning"
+    assert "description could not be updated: ADO 403 Forbidden" in text
+
+
 def test_existing_project_on_another_process_is_rejected() -> None:
     client = FakeClient(existing_id="proj-existing", existing_process="AGILE-GUID")
     ir = {"targets": {"project_name": "MSBPCProj", "process_name": "MSBPCTemplate"}}

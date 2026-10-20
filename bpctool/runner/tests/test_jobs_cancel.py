@@ -123,6 +123,37 @@ def test_crashed_apply_releases_its_slot_once(monkeypatch: pytest.MonkeyPatch) -
     _wait_for(lambda: jobs.get_job(running.id).status == "succeeded")
 
 
+def test_finished_job_forgets_the_pat(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def fake_run_apply(request, *, pat, **_kwargs):
+        seen.append(pat)
+        return ApplyResult(ok=True, dry_run=False)
+
+    monkeypatch.setattr(jobs, "run_apply", fake_run_apply)
+    job = jobs.create_job(_request())
+    _wait_for(lambda: jobs.get_job(job.id).status == "succeeded")
+    _wait_for(lambda: jobs._jobs[job.id]["request"].pat is None)
+    assert seen == ["x" * 52]
+
+
+def test_only_recent_finished_jobs_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        jobs, "run_apply", lambda request, **_kwargs: ApplyResult(ok=True, dry_run=False)
+    )
+    created = []
+    for _ in range(jobs.MAX_FINISHED_JOBS + 5):
+        job = jobs.create_job(_request())
+        _wait_for(lambda job_id=job.id: jobs.get_job(job_id).status == "succeeded")
+        created.append(job.id)
+
+    with pytest.raises(KeyError):
+        jobs.get_job(created[0])
+    assert jobs.get_job(created[-1]).status == "succeeded"
+    finished = [j for j in jobs._jobs.values() if j["status"] not in {"queued", "running"}]
+    assert len(finished) <= jobs.MAX_FINISHED_JOBS
+
+
 def test_cancel_finished_job_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         jobs, "run_apply", lambda request, **_kwargs: ApplyResult(ok=True, dry_run=False)

@@ -30,6 +30,8 @@ _jobs: dict[str, dict[str, Any]] = {}
 # One apply per org/project at a time: two concurrent runs would create duplicate
 # work items (both miss each other's ado-id-map.csv rows) and overwrite reports.
 _active_apply_keys: dict[str, str] = {}
+# Finished jobs kept for polling; older ones (with their event logs) are dropped.
+MAX_FINISHED_JOBS = 20
 
 
 class ApplyInProgressError(RuntimeError):
@@ -140,6 +142,7 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
                     "would create duplicate work items and overwrite each other's reports."
                 )
             _active_apply_keys[apply_key] = job_id
+        _prune_finished_jobs()
         _jobs[job_id] = record
 
     if request.mode == "dry-run":
@@ -150,6 +153,22 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
     thread = threading.Thread(target=_execute_job, args=(job_id,), daemon=True)
     thread.start()
     return get_job(job_id)
+
+
+def _prune_finished_jobs() -> None:
+    """Drop the oldest finished jobs beyond MAX_FINISHED_JOBS. Caller holds ``_lock``."""
+    finished = [
+        job_id for job_id, job in _jobs.items() if job["status"] not in {"queued", "running"}
+    ]
+    for job_id in finished[: max(0, len(finished) - MAX_FINISHED_JOBS + 1)]:
+        del _jobs[job_id]
+
+
+def _forget_pat(job_id: str) -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        if job and job["request"].pat:
+            job["request"] = job["request"].model_copy(update={"pat": None})
 
 
 def _release_apply_key(job_id: str) -> None:
@@ -313,6 +332,8 @@ def _execute_job(job_id: str) -> None:
                     "message": f"{exc} (after {format_duration_ms(duration_ms)})",
                 }
             )
+    finally:
+        _forget_pat(job_id)
 
 
 def get_job(job_id: str, *, since: int = 0) -> JobStatusResponse:

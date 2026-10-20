@@ -418,6 +418,8 @@ def test_root_area_path_override_moves_catalog_areas_under_it() -> None:
     assert already.fields["System.AreaPath"] == "NewProj\\Imported\\Functional areas"
     assert manual.fields["System.AreaPath"] == "NewProj\\Manual area"
     assert result.counts == {"area_root_applied": 1, "area_path_project_renamed": 1}
+    renamed = next(issue for issue in result.issues if issue.kind == "area_path_project_renamed")
+    assert renamed.detail == "'OldProj' → 'NewProj', placed under Root area path 'NewProj\\Imported'"
 
 
 def test_root_area_path_equal_to_project_or_unset_changes_nothing() -> None:

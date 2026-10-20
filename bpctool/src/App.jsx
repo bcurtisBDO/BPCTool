@@ -244,8 +244,8 @@ function App() {
   const [apiStatusText, setApiStatusText] = useState(
     'Fetch projects to validate the PAT against Azure DevOps.',
   )
-  const [extensionStatus, setExtensionStatus] = useState('unknown')
-  const [extensionMessage, setExtensionMessage] = useState('')
+  const [checkedExtensionStatus, setExtensionStatus] = useState('unknown')
+  const [checkedExtensionMessage, setExtensionMessage] = useState('')
   const [extensionBusy, setExtensionBusy] = useState(false)
 
   const [catalogProgress, setCatalogProgress] = useState(null)
@@ -352,7 +352,12 @@ function App() {
     return true
   }
 
+  // Bumped whenever the org URL or PAT changes, so a fetch still in flight for the
+  // previous connection doesn't record its lists against the new one.
+  const connectionGenRef = useRef(0)
+
   const setOrgUrl = (value) => {
+    connectionGenRef.current += 1
     setOrgUrlState(value)
     writeSession(SESSION_ORG_URL, value)
     setProjects([])
@@ -362,6 +367,7 @@ function App() {
   }
 
   const setPat = (value) => {
+    connectionGenRef.current += 1
     setPatState(value)
     writeSession(SESSION_PAT, value)
     setProjectsFetched(false)
@@ -427,14 +433,16 @@ function App() {
     projectName.trim() ? ` · project “${projectName.trim()}”` : '',
   ].join('')
 
+  const extensionCheckable = connectionReady && executionMode !== 'simulate'
+  const extensionStatus = extensionCheckable ? checkedExtensionStatus : 'unknown'
+  let extensionMessage = checkedExtensionMessage
+  if (!extensionCheckable) {
+    extensionMessage =
+      executionMode === 'simulate' ? 'Simulate mode skips Azure DevOps extension checks.' : ''
+  }
+
   useEffect(() => {
-    if (!connectionReady || executionMode === 'simulate') {
-      setExtensionStatus('unknown')
-      setExtensionMessage(
-        executionMode === 'simulate'
-          ? 'Simulate mode skips Azure DevOps extension checks.'
-          : '',
-      )
+    if (!extensionCheckable) {
       return undefined
     }
 
@@ -482,7 +490,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [connectionReady, effectiveOrgUrl, pat, executionMode])
+  }, [extensionCheckable, effectiveOrgUrl, pat])
 
   const cacheKey = useMemo(
     () => buildCacheKey(effectiveOrgUrl, processName, projectName),
@@ -786,9 +794,13 @@ function App() {
     setProjectsFetched(false)
     setProjects([])
     setApiStatusText('Fetching projects...')
+    const generation = connectionGenRef.current
 
     try {
       const list = await fetchProjects(effectiveOrgUrl, pat.trim())
+      if (generation !== connectionGenRef.current) {
+        return
+      }
       setProjects(list)
       setProjectsFetched(true)
       setApiStatusText(
@@ -797,6 +809,9 @@ function App() {
       setRunMessage(`Fetched ${list.length} project${list.length === 1 ? '' : 's'} from Azure DevOps.`)
       addLog(`API: fetched ${list.length} projects`)
     } catch (error) {
+      if (generation !== connectionGenRef.current) {
+        return
+      }
       const message = error instanceof Error ? error.message : 'Failed to fetch projects'
       setProjectsFetched(false)
       setApiStatusText(message)
@@ -816,9 +831,13 @@ function App() {
     setProcessesFetched(false)
     setProcesses([])
     setApiStatusText('Fetching processes...')
+    const generation = connectionGenRef.current
 
     try {
       const list = await fetchProcesses(effectiveOrgUrl, pat.trim())
+      if (generation !== connectionGenRef.current) {
+        return
+      }
       setProcesses(list)
       setProcessesFetched(true)
       setApiStatusText(
@@ -827,6 +846,9 @@ function App() {
       setRunMessage(`Fetched ${list.length} process${list.length === 1 ? '' : 'es'} from Azure DevOps.`)
       addLog(`API: fetched ${list.length} processes`)
     } catch (error) {
+      if (generation !== connectionGenRef.current) {
+        return
+      }
       const message = error instanceof Error ? error.message : 'Failed to fetch processes'
       setProcessesFetched(false)
       setApiStatusText(message)

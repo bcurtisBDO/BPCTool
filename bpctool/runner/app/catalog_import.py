@@ -7,9 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
-
-from .excel_ir import _cell, is_catalog_source_file
+from .excel_ir import _cell, catalog_sheet_rows, is_catalog_source_file
 from .mapping import TemplateMapping, normalize
 from .richtext import normalize_field_value, normalize_rich_text
 
@@ -131,13 +129,7 @@ def _drafts_from_workbook(
     convert_markdown_to_html: bool = False,
     seen_keys: set[str] | None = None,
 ) -> list[WorkItemDraft]:
-    wb = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet_name = wb.sheetnames[0]
-        ws = wb[sheet_name]
-        rows = list(ws.iter_rows(values_only=True))
-    finally:
-        wb.close()
+    sheet_name, rows = catalog_sheet_rows(path)
     if not rows:
         return []
 

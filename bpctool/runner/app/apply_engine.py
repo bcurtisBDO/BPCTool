@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .ado_client import AdoClient, ReadOnlyAdoClient
+from .ado_client import AdoClient, AdoError, ReadOnlyAdoClient
 from .excel_ir import build_ir
-from .models import ApplyResult, DryRunRequest, DryRunResponse
+from .models import ApplyResult, DryRunRequest
 from .org_url import normalize_ado_org_url, parse_ado_org_url
 from .paths import output_root
 from .planner import STEP_ORDER, build_dry_run_plan
@@ -101,14 +101,61 @@ def run_apply(
         except ValueError:
             change_reader = None
 
+    output_dir = default_output_dir(org_url, request.project_name, request.output_root)
+    step_results: dict[str, Any] = {}
+
+    def _write_summary(error: str | None, cancelled: bool) -> dict[str, Any] | None:
+        """Every run (incl. failed/cancelled) refreshes the summary so files never disagree."""
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            outcome = write_run_summary(
+                ir,
+                step_results=step_results,
+                output_dir=output_dir,
+                org_url=org_url,
+                dry_run=dry_run,
+                run_id=run_id,
+                run_started=run_started_wall,
+                error=error,
+                cancelled=cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 - never mask the run's own result
+            _emit({"type": "step-progress", "stepId": "report", "message": f"Could not write summary: {exc}"})
+            return None
+        _emit(
+            {
+                "type": "step-progress",
+                "stepId": "report",
+                "message": f"Summary: {outcome['headline']}",
+            }
+        )
+        return outcome
+
     process_exists = request.known_process_exists
     project_exists = request.known_project_exists
     # (target, list the browser sent: None = not loaded, False = loaded without it)
     unlisted: list[tuple[str, bool | None]] = []
     if client:
         # The browser's inventory is optional and can be stale; policy gates use what ADO reports.
-        process_exists = client.get_process_id(request.process_name) is not None
-        project_exists = client.get_project_id(request.project_name) is not None
+        try:
+            process_exists = client.get_process_id(request.process_name) is not None
+            project_exists = client.get_project_id(request.project_name) is not None
+        except AdoError as exc:
+            error = f"Could not check the process and project in Azure DevOps before the run: {exc}"
+            _emit({"type": "job-error", "message": error, "durationMs": 0})
+            return ApplyResult(
+                ok=False,
+                dry_run=dry_run,
+                plan=None,
+                step_results={},
+                output_dir=str(output_dir),
+                error=error,
+                events=events,
+                duration_ms=0,
+                timings=[],
+                run_id=run_id,
+                outcome=_write_summary(error, False),
+            )
         if process_exists and not request.known_process_exists:
             unlisted.append(("process", request.known_process_exists))
         if project_exists and not request.known_project_exists:
@@ -153,39 +200,11 @@ def run_apply(
             timings=[],
         )
 
-    output_dir = default_output_dir(org_url, request.project_name, request.output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    step_results: dict[str, Any] = {}
     process_id: str | None = None
 
     planned = {step["id"]: step for step in plan.steps}
-
-    def _write_summary(error: str | None, cancelled: bool) -> dict[str, Any] | None:
-        """Every run (incl. failed/cancelled) refreshes the summary so files never disagree."""
-        try:
-            outcome = write_run_summary(
-                ir,
-                step_results=step_results,
-                output_dir=output_dir,
-                org_url=org_url,
-                dry_run=dry_run,
-                run_id=run_id,
-                run_started=run_started_wall,
-                error=error,
-                cancelled=cancelled,
-            )
-        except Exception as exc:  # noqa: BLE001 - never mask the run's own result
-            _emit({"type": "step-progress", "stepId": "report", "message": f"Could not write summary: {exc}"})
-            return None
-        _emit(
-            {
-                "type": "step-progress",
-                "stepId": "report",
-                "message": f"Summary: {outcome['headline']}",
-            }
-        )
-        return outcome
     selected = step_filter or STEP_ORDER
 
     _emit({"type": "apply-started", "message": f"Starting {'dry-run apply' if dry_run else 'apply'}"})
@@ -268,7 +287,12 @@ def run_apply(
                 )
             elif step_id == "backlog":
                 result = apply_backlog(
-                    client, ir, dry_run=dry_run, emit=step_emit, process_id=process_id
+                    client,
+                    ir,
+                    dry_run=dry_run,
+                    emit=step_emit,
+                    process_id=process_id,
+                    workers=int(getattr(request, "catalog_parallel_workers", 4) or 4),
                 )
             elif step_id == "catalog":
                 result = apply_catalog(
@@ -331,7 +355,6 @@ def run_apply(
                 }
             )
 
-        check_cancel()
         outcome = _write_summary(None, False)
 
         total_ms = int((time.perf_counter() - run_started) * 1000)

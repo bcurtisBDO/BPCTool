@@ -391,6 +391,25 @@ def test_read_only_client_refuses_writes(monkeypatch) -> None:
     assert calls == ["GET", "POST", "POST"]
 
 
+def test_microsoft_id_search_pages_past_the_wiql_result_cap(monkeypatch) -> None:
+    all_ids = list(range(1, 26))
+    queries: list[tuple[str, str]] = []
+
+    def fake_request(self, method, path, json_body=None, **_kw):
+        query = json_body["query"]
+        queries.append((path, query))
+        after = int(query.split("[System.Id] > ")[1].split()[0])
+        page = [i for i in all_ids if i > after][: self.WIQL_PAGE]
+        return {"workItems": [{"id": i} for i in page]}
+
+    monkeypatch.setattr(AdoClient, "request", fake_request)
+    monkeypatch.setattr(AdoClient, "WIQL_PAGE", 10)
+    client = ReadOnlyAdoClient("https://dev.azure.com/contoso", "x" * 52)
+    assert client.find_work_items_with_field("Proj", "Process", "MSBPC.microsoftid") == all_ids
+    assert [path for path, _query in queries] == ["/_apis/wit/wiql?$top=10"] * 3
+    assert "ORDER BY [System.Id]" in queries[0][1]
+
+
 def test_rehearsal_outcome_and_html_show_changes(tmp_path) -> None:
     raw = summarize_changes(
         _compare(

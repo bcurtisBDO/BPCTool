@@ -125,8 +125,8 @@ Every catalog workbook in the selected folder is imported, so don't mix releases
 1. **Process template** — work item types, fields, picklists (Multi-select → suggested lists); disables types the workbook disables (e.g. Epic / Feature / User story)
 2. **Page layouts** — before any project; DevLabs Multivalue control for Multi-select fields
 3. **Project** — create or bind, with an optional description; an existing project must use the selected process
-4. **Teams & areas** — multi-path team assignments, optionally under a root area below the project
-5. **Backlog & iterations** — levels from the **Backlogs** sheet, WIT mapping, team iterations
+4. **Teams & areas** — multi-path team assignments (with *Include sub areas* from the Teams sheet), optionally under a root area below the project
+5. **Backlog & iterations** — levels from the **Backlogs** sheet, WIT mapping, team iterations (teams in parallel)
 6. **Catalog import** — every matching workbook in the catalog folder; parallel, resumable, with parent-link backfill
 7. **Report** — HTML/JSON summary
 
@@ -190,7 +190,6 @@ JSON versions (`*-summary.json`, `import-failures.json`, `import-prevalidate.jso
 | [USER_GUIDE](./bpctool/USER_GUIDE.md)                                                      | Full usage: install, every screen and option, Excel sheets, outputs, local API, troubleshooting                                                                 |
 | [CHANGELOG](./bpctool/CHANGELOG.md)                                                        | Release history                                                                                                                                                 |
 | [Workflow & reference-script comparison](./bpctool/docs/workflow-and-script-comparison.md) | Engine steps, quarterly releases, X vs H field applicability, catalog parallel/resume/backfill, incremental re-runs, Microsoft reference scripts vs BPCTool     |
-| [Process analysis (MSBPC snapshot)](./bpctool/docs/reference/MSBPC-process-analysis.md)    | The process as created from one template release (43 WITs, generated 2026-08-09) — useful when comparing layouts, states, and fields; later releases may differ |
 
 
 
@@ -202,7 +201,7 @@ bpctool/
   src/                  React UI (Vite)
   runner/               FastAPI runner: Excel → IR → plan → apply
   scripts/              Launcher env + Vite local-runner plugin
-  docs/                 Comparison doc, process snapshot, screenshots
+  docs/                 Comparison doc, screenshots
   Start BPCTool.*       One-click launchers
   bpctool.env.example   Optional folder settings (copy to bpctool.env)
   runner-out/           Default run outputs (gitignored)
@@ -210,7 +209,8 @@ bpctool/
 
 ```bash
 cd bpctool
-npm start                            # UI + runner with --reload
+npm start                            # UI + runner (relaunch to load code changes)
+npm run dev                          # same, runner with --reload (a code change restarts it mid-run)
 npm run runner                       # runner API only (127.0.0.1:8787)
 npm test                             # UI tests (vitest)
 cd runner && ../.venv/bin/pytest -q  # runner tests

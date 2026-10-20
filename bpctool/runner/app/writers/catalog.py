@@ -107,7 +107,7 @@ def apply_catalog(
     stats["retired_skipped"] = len(retired)
 
     for draft in drafts:
-        for ref, kind in draft.content_formats.items():
+        for kind in draft.content_formats.values():
             stats["html_fields_normalized"] += 1
             if kind == "markdown":
                 stats["markdown_preserved"] += 1

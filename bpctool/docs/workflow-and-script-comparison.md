@@ -67,7 +67,7 @@ Hiding uses `PATCH …/layout/groups/{groupId}/controls/{fieldRef}` with `visibl
 
 **Verdict:** BPCTool extends the reference scripts — `H` is honoured as "on the type, hidden from the form" instead of being ignored.
 
-**Process custom rules:** Neither the guideline sheets nor BPCTool apply WIT Process Rules (conditions/actions). Fields sheet **Required** / **Default value** drive layout + catalog defaults only. Post-apply MSBPC snapshots show Custom Rules → None. (Exporting source-org rules into a future Rules sheet is out of scope for current BPCTool.)
+**Process custom rules:** Neither the guideline sheets nor BPCTool apply WIT Process Rules (conditions/actions). Fields sheet **Required** / **Default value** drive layout + catalog defaults only, so a process created from the template has no custom rules. (Exporting source-org rules into a future Rules sheet is out of scope for current BPCTool.)
 
 ---
 
@@ -79,7 +79,7 @@ Re-runs against an existing org/process/project are supported, but “incrementa
 
 | Policy | Behavior |
 |--------|----------|
-| **Require confirmation** | Fail plan/apply if process/project exists and confirm boxes are unchecked |
+| **Require confirmation** | Fail plan/apply if process/project exists and confirm boxes are unchecked (process: Process, Layout or Backlog step; project: Project step) |
 | **Always update** | Proceed; writers reuse/update existing targets (still create-if-missing, not full rewrite) |
 | **Skip existing** | Skip process (and layout with it) and/or project (and teams/backlog with it) when targets exist |
 | **Create only** | Fail if selected process/project already exists |
@@ -91,10 +91,10 @@ Catalog is **not** gated by update policy.
 | Step | On subsequent run | Conflicts / collisions |
 |------|-------------------|------------------------|
 | **process** | Create missing WITs/picklists/fields; PATCH some field metadata; disable Excel-disabled WITs when possible | WIT create **409** → skip; org field re-PATCH may log non-fatal `MSBPC.*` 404 |
-| **layout** | Add missing pages/groups/controls for `X` fields; add `H` fields to the WIT and hide their controls; re-show a control when `H` → `X` | Field/control **400/409** → treat as already present; does **not** remove controls for fields that became blank |
+| **layout** | Add missing pages/groups/controls for `X` fields; add `H` fields to the WIT and hide their controls; re-show a control when `H` → `X` | Each type's fields and form are read once; fields already on the type are skipped. Field **409** → present; field **400** → try the boolean fallback payloads, then report it. Control **409** → present; does **not** remove controls for fields that became blank |
 | **project** | Reuse existing; update description when UI description is non-empty | Does **not** re-bind process template on an existing project; stops with an error if the project was created from a different process |
-| **teams** | Create missing teams/areas; PATCH team area assignments | Team/area create **409** → exists |
-| **backlog** | Rename/heal/create behaviors; assign WITs; create missing iterations; team settings | Duplicate custom levels healed (prefer system Agile); name already present → reuse |
+| **teams** | Create missing teams/areas (area tree read once); PATCH team area assignments with *Include sub areas* from the Teams sheet, so a Teams-only re-run keeps it | Team/area create **409** → exists; team names matched ignoring case |
+| **backlog** | Rename/heal/create behaviors; assign WITs; create missing iterations; team settings (teams in parallel, **Catalog workers**) | Duplicate custom levels healed (prefer system Agile); name already present → reuse |
 | **catalog** | **Create-only fields** — keys in `ado-id-map.csv` **skipped** (no WIP field refresh); new keys created; then parent-link backfill. A rehearsal first reports field / parent / type differences against the existing items (`import-changes.csv`) | See backfill statuses below; without `ado-id-map.csv` every row is created again — the rehearsal flags rows that already exist (matched by Microsoft ID) |
 | **report** | Regenerates local HTML/JSON | N/A (no ADO) |
 
@@ -172,10 +172,10 @@ Hosts:
 |------|--------------|----------------------|
 | **Preflight** | UI Connection / Run gate; `require_multivalue_extension` | `GET\|POST /_apis/extensionmanagement/installedextensionsbyname/ms-devlabs/vsts-extensions-multivalue-control` (`7.1-preview.1`) |
 | **process** | `POST /api/jobs` → `apply_process` | `GET\|POST /_apis/work/processes` · WIT create/PATCH · `GET\|POST\|PUT /_apis/work/processes/lists` · `GET\|POST\|PATCH /_apis/wit/fields` |
-| **layout** | `apply_layout` | GET layout · POST pages/groups/controls · POST `…/workItemTypes/{wit}/fields` · `PATCH …/layout/groups/{group}/controls/{field}` (`visible` for `H`) · MultivalueContribution / HtmlFieldControl |
+| **layout** | `apply_layout` | GET `…/workItemTypes/{wit}/fields` and layout once per WIT (layout re-read after an add) · POST pages/groups/controls · POST `…/workItemTypes/{wit}/fields` for missing fields · `PATCH …/layout/groups/{group}/controls/{field}` (`visible` for `H`) · MultivalueContribution / HtmlFieldControl |
 | **project** | `apply_project` | GET processes · `GET\|POST /_apis/projects` · `PATCH /_apis/projects/{id}` (description) |
-| **teams** | `apply_teams` (reference Script 3) | `GET\|POST …/projects/{id}/teams` · `GET\|POST` classificationnodes/Areas · `PATCH` teamsettings/teamfieldvalues |
-| **backlog** | `apply_backlog` (reference Script 4) | Process behaviors (GET/PUT/POST/DELETE) · WIT↔behavior · Iterations nodes · `GET\|PATCH` teamsettings · team iterations |
+| **teams** | `apply_teams` (reference Script 3) | `GET\|POST …/projects/{id}/teams` · `GET` classificationnodes/Areas tree once · `POST` missing area nodes · `PATCH` teamsettings/teamfieldvalues (`includeChildren` from *Include sub areas*) |
+| **backlog** | `apply_backlog` (reference Script 4) | Process behaviors (GET/PUT/POST/DELETE) · WIT↔behavior · Iterations nodes · `GET\|PATCH` teamsettings · team iterations (teams configured in parallel, **Catalog workers**) |
 | **catalog** | `apply_catalog` + prevalidate + `catalog_runtime` | Parallel `PATCH …/wit/workitems/$Type` (fields + optional Markdown format + optional Hierarchy-Reverse); resume via `ado-id-map.csv`; `POST …/wit/wiql` only to reconcile a create with unknown outcome; backfill `GET …?$expand=Relations` + `PATCH …/workitems/{id}` for parent links not recorded at create |
 | **report** | `apply_report` | None — writes `bpc-ado-setup-summary.json` / `.html` under `<Run output folder>/<org>_<project>/` (also written automatically at the end of every live run; Rehearsal writes `rehearsal-summary.*`) |
 
@@ -215,9 +215,9 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 | **Process / fields / picklists** | Script 1 creates inherited process, WITs, fields, picklists | Ported via `apply_process`; multi-select → suggested picklists (`isSuggested`); re-run create-if-missing + limited PATCH | Improved / ported |
 | **Disabled WITs** | Script 1 skips rows marked `Disabled` and tells you to disable the type by hand | Tries the Process API disable (`isDisabled`), falls back to the same manual instruction when the API refuses | Improved |
 | **Test Case `New` state** | Script 1 adds a `New` state (Proposed category) to Test Case types so catalog rows with `State = New` import | Doesn't add the state; data checks drop `State = New` on Test Case (listed in `import-prevalidate.csv`). The July catalog workbooks fill no State values, so neither path is used today | Gap (no current effect) |
-| **Page layout** | Script 2 threaded layout + DevLabs MultivalueContribution | `apply_layout` mirrors Script 2; re-run adds missing controls (no stale remove) | Improved / ported |
+| **Page layout** | Script 2 threaded layout + DevLabs MultivalueContribution | `apply_layout` mirrors Script 2, reading each type's fields and form once; boolean fields retry the fallback payloads after a 400; re-run adds missing controls (no stale remove) | Improved / ported |
 | **Teams & areas** | Script 3 teams, L1–L4 areas, `set_team_area` | `apply_teams` — reference semantics; re-run upserts areas/assignments | Improved / ported |
-| **Backlog & iterations** | Script 4 Parts 1–4: behaviors, WIT assign, defaults, team iterations | `apply_backlog` — rename/heal levels, WIT↔behavior, iterations, team settings | Improved / ported |
+| **Backlog & iterations** | Script 4 Parts 1–4: behaviors, WIT assign, defaults, team iterations | `apply_backlog` — rename/heal levels, WIT↔behavior, iterations, team settings (teams in parallel) | Improved / ported |
 | **Incremental process/project** | Script re-runs with exist checks / warnings | Explicit update policies + confirm flags; writers still not full overwrite | Improved / ported |
 | **Catalog hierarchy** | Parent-child Hierarchy-Reverse only | Same — Title 1..N; no other WIT relation types | Parity |
 | **Catalog parallelism** | `--catalog-parallel-workers` parent-aware pool | UI **Catalog workers** / `catalog_parallel_workers` parent-aware ready queue; keep-alive connections | Improved / ported |
@@ -255,4 +255,4 @@ Key sources: `runner/app/planner.py`, `apply_engine.py`, `ado_client.py`, `catal
 - Inherited system WIT disable can still fail in the Process API (manual ADO UI fallback).
 - Re-run Process may log non-fatal `MSBPC.*` field 404s when org fields already exist (Update API is lock/undelete only).
 
-See also: [USER_GUIDE.md](../USER_GUIDE.md) (§9 catalog, §10 re-runs, §17 limitations), [CHANGELOG.md](../CHANGELOG.md) (standalone replacement + residual risk), [reference/MSBPC-process-analysis.md](./reference/MSBPC-process-analysis.md) (post-create process snapshot).
+See also: [USER_GUIDE.md](../USER_GUIDE.md) (§9 catalog, §10 re-runs, §17 limitations), [CHANGELOG.md](../CHANGELOG.md) (standalone replacement + residual risk).

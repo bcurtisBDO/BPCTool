@@ -238,3 +238,60 @@ def test_live_run_checks_ado_for_existing_targets_without_inventory(
         step_filter=["process", "project"],
     )
     assert any("Not known whether the process already exists" in w for w in preview.warnings)
+
+
+def test_live_run_writes_summary_when_ado_check_fails(template_path, tmp_path, monkeypatch) -> None:
+    from app import apply_engine
+    from app.ado_client import AdoError
+    from app.models import DryRunRequest
+
+    class ExpiredPat:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def get_process_id(self, _name: str) -> str:
+            raise AdoError("Azure DevOps returned a sign-in page (HTTP 203)", status=401)
+
+    monkeypatch.setattr(apply_engine, "AdoClient", ExpiredPat)
+    request = DryRunRequest(
+        org_url="https://dev.azure.com/contoso",
+        process_name="Business Process Catalog",
+        project_name="Contoso-BPC",
+        excel_file=str(template_path),
+        output_root=str(tmp_path),
+    )
+    events: list[dict] = []
+    result = apply_engine.run_apply(request, pat="x", dry_run=False, step_filter=["process"], emit=events.append)
+    assert not result.ok
+    assert result.error.startswith("Could not check the process and project in Azure DevOps before the run")
+    assert "sign-in page" in result.error
+    assert result.outcome and result.outcome["status"] == "failed"
+    assert (tmp_path / "contoso_Contoso-BPC" / "bpc-ado-setup-summary.html").is_file()
+    assert any(event["type"] == "job-error" for event in events)
+
+
+def test_cancel_after_the_last_step_still_counts_as_finished(template_path, tmp_path) -> None:
+    from app.apply_engine import run_apply
+    from app.models import DryRunRequest
+
+    request = DryRunRequest(
+        org_url="https://dev.azure.com/contoso",
+        process_name="Business Process Catalog",
+        project_name="Contoso-BPC",
+        excel_file=str(template_path),
+        output_root=str(tmp_path),
+    )
+    steps_done: list[str] = []
+
+    def cancel_once_report_finished() -> bool:
+        return "report" in steps_done
+
+    result = run_apply(
+        request,
+        pat="",
+        dry_run=True,
+        step_filter=["report"],
+        should_cancel=cancel_once_report_finished,
+        emit=lambda event: event["type"] == "step-completed" and steps_done.append(event["stepId"]),
+    )
+    assert result.ok and not result.cancelled, result.error

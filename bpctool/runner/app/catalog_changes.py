@@ -339,7 +339,7 @@ def compare_with_azure_devops(
 def _difference_snippets(current: str, workbook: str, width: int = 120, lead: int = 30) -> tuple[str, str]:
     """Both values cut to ``width``, starting just before the first difference."""
     same = 0
-    for a, b in zip(current, workbook):
+    for a, b in zip(current, workbook, strict=False):
         if a != b:
             break
         same += 1

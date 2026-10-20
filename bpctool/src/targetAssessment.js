@@ -83,7 +83,8 @@ export function gateExistingTargetUpdates({
   const skippedStepIds = []
   const planned = new Set(targetStepIds)
 
-  const processTouched = planned.has('process') || planned.has('layout')
+  // Backlog changes the process's backlog levels, which every project on the process shares.
+  const processTouched = planned.has('process') || planned.has('layout') || planned.has('backlog')
   const projectTouched = planned.has('project') || planned.has('teams') || planned.has('backlog')
 
   if (updatePolicy === 'skip-existing') {
@@ -99,7 +100,9 @@ export function gateExistingTargetUpdates({
     if (
       processTouched &&
       assessment.process.exists &&
-      (planned.has('process') || (planned.has('layout') && assessment.workbook.changed)) &&
+      (planned.has('process') ||
+        planned.has('backlog') ||
+        (planned.has('layout') && assessment.workbook.changed)) &&
       !confirmProcessUpdate
     ) {
       errors.push(
@@ -115,7 +118,7 @@ export function gateExistingTargetUpdates({
   }
 
   if (updatePolicy === 'create-only') {
-    if (assessment.process.exists && processTouched && planned.has('process')) {
+    if (assessment.process.exists && processTouched) {
       errors.push(
         `Process "${assessment.process.name}" already exists and update policy is create-only.`,
       )
@@ -148,7 +151,7 @@ export function workbookApplyKey(orgUrl, processName) {
  * Validate typed process/project names for create/update against policy.
  * Returns field errors and whether the run can proceed for naming.
  * With targetStepIds, policy only applies to the targets those steps change
- * (process: Process / Layout; project: Project), as the runner does.
+ * (process: Process / Layout / Backlog; project: Project), as the runner does.
  */
 export function validateTargetNames({
   processName,
@@ -189,7 +192,8 @@ export function validateTargetNames({
 
   const planned = targetStepIds ? new Set(targetStepIds) : null
   const checkProcess = Boolean(
-    assessment?.process.exists && (!planned || planned.has('process') || planned.has('layout')),
+    assessment?.process.exists &&
+      (!planned || planned.has('process') || planned.has('layout') || planned.has('backlog')),
   )
   const checkProject = Boolean(
     requireProjectName && assessment?.project.exists && (!planned || planned.has('project')),

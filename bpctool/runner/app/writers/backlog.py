@@ -6,6 +6,7 @@ bug behavior / backlog iteration and POST every iteration onto the team.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -21,7 +22,9 @@ def apply_backlog(
     dry_run: bool,
     emit: Emit,
     process_id: str | None = None,
+    workers: int = 1,
 ) -> dict[str, Any]:
+    """``workers`` > 1 configures teams in parallel (each team's requests stay in order)."""
     project = ir["targets"]["project_name"]
     process_name = ir["targets"]["process_name"]
     stats = {
@@ -98,6 +101,7 @@ def apply_backlog(
                 child_ids=child_ids,
                 stats=stats,
                 emit=emit,
+                workers=workers,
             )
 
     emit(
@@ -777,76 +781,107 @@ def _configure_team_iterations(
     child_ids: list[dict[str, str]],
     stats: dict[str, Any],
     emit: Emit,
+    workers: int = 1,
 ) -> None:
-    teams = ir["project"]["teams"]
+    teams = [team for team in ir["project"]["teams"] if (team.get("name") or "").strip()]
     if not teams:
         emit("backlog", "No teams in IR; skipping team iteration assignment")
         return
 
-    for team in teams:
-        team_name = (team.get("name") or "").strip()
-        if not team_name:
-            continue
-        team_project = f"{project}/{team_name}"
+    def configure(team: dict[str, Any]) -> dict[str, int]:
+        return _configure_one_team(
+            client,
+            team,
+            project,
+            root_id=root_id,
+            iteration_map=iteration_map,
+            child_ids=child_ids,
+            emit=emit,
+        )
+
+    pool_size = max(1, min(workers, len(teams)))
+    if pool_size == 1:
+        results = [configure(team) for team in teams]
+    else:
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
+            results = list(pool.map(configure, teams))
+    for team_stats in results:
+        for key, value in team_stats.items():
+            stats[key] += value
+
+
+def _configure_one_team(
+    client: AdoClient,
+    team: dict[str, Any],
+    project: str,
+    *,
+    root_id: str,
+    iteration_map: dict[str, str],
+    child_ids: list[dict[str, str]],
+    emit: Emit,
+) -> dict[str, int]:
+    """One team's settings, iterations and include-children; returns that team's counts."""
+    stats = {"team_settings": 0, "team_iterations": 0, "warnings": 0}
+    team_name = (team.get("name") or "").strip()
+    team_project = f"{project}/{team_name}"
+    try:
+        settings = client.get(
+            "/_apis/work/teamsettings",
+            project=team_project,
+            api_version="7.1",
+        )
+    except AdoError as exc:
+        emit("backlog", f"Team settings GET '{team_name}': {exc}")
+        stats["warnings"] += 1
+        return stats
+
+    payload = _team_settings_payload(team, settings or {}, root_id, iteration_map)
+    backlog_ok = _current_backlog_id(settings or {}) == root_id
+    if payload:
         try:
-            settings = client.get(
+            client.patch(
                 "/_apis/work/teamsettings",
                 project=team_project,
+                json_body=payload,
                 api_version="7.1",
             )
-        except AdoError as exc:
-            emit("backlog", f"Team settings GET '{team_name}': {exc}")
-            stats["warnings"] += 1
-            continue
-
-        payload = _team_settings_payload(team, settings or {}, root_id, iteration_map)
-        backlog_ok = _current_backlog_id(settings or {}) == root_id
-        if payload:
-            try:
-                client.patch(
-                    "/_apis/work/teamsettings",
-                    project=team_project,
-                    json_body=payload,
-                    api_version="7.1",
-                )
-                stats["team_settings"] += 1
-                backlog_ok = True
-                emit(
-                    "backlog",
-                    f"Updated team settings for '{team_name}': {sorted(payload.keys())} "
-                    f"(backlogIteration={payload.get('backlogIteration', root_id)})",
-                )
-            except AdoError as exc:
-                emit("backlog", f"FAILED team settings PATCH '{team_name}': {exc}")
-                stats["warnings"] += 1
-                backlog_ok = False
-        else:
             stats["team_settings"] += 1
-
-        if not backlog_ok:
+            backlog_ok = True
             emit(
                 "backlog",
-                f"Skipping iteration selection for '{team_name}' — backlog iteration "
-                "not set (ADO requires Backlog iteration before Select iteration(s)).",
+                f"Updated team settings for '{team_name}': {sorted(payload.keys())} "
+                f"(backlogIteration={payload.get('backlogIteration', root_id)})",
             )
+        except AdoError as exc:
+            emit("backlog", f"FAILED team settings PATCH '{team_name}': {exc}")
             stats["warnings"] += 1
-            continue
+            backlog_ok = False
+    else:
+        stats["team_settings"] += 1
 
-        added = _add_iterations_to_team(
-            client, team_project, team_name, child_ids, emit, stats
+    if not backlog_ok:
+        emit(
+            "backlog",
+            f"Skipping iteration selection for '{team_name}' — backlog iteration "
+            "not set (ADO requires Backlog iteration before Select iteration(s)).",
         )
-        stats["team_iterations"] += added
-        if added:
-            emit("backlog", f"Added {added} iterations to team '{team_name}'")
-        else:
-            emit("backlog", f"Team '{team_name}' already has all {len(child_ids)} iterations")
+        stats["warnings"] += 1
+        return stats
 
-        if _truthy(team.get("include_sub_areas")):
-            try:
-                _enable_include_children(client, team_project, team_name, emit)
-            except AdoError as exc:
-                emit("backlog", f"Include-children update '{team_name}': {exc}")
-                stats["warnings"] += 1
+    added = _add_iterations_to_team(client, team_project, team_name, child_ids, emit, stats)
+    stats["team_iterations"] += added
+    if added:
+        emit("backlog", f"Added {added} iterations to team '{team_name}'")
+    else:
+        emit("backlog", f"Team '{team_name}' already has all {len(child_ids)} iterations")
+
+    if _truthy(team.get("include_sub_areas")):
+        try:
+            _enable_include_children(client, team_project, team_name, emit)
+        except AdoError as exc:
+            emit("backlog", f"Include-children update '{team_name}': {exc}")
+            stats["warnings"] += 1
+    return stats
 
 
 def _current_backlog_id(settings: dict[str, Any]) -> str:

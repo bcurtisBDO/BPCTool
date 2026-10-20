@@ -139,6 +139,104 @@ def test_apply_teams_nests_areas_under_root_area_path() -> None:
     assert body["defaultValue"] == "MSBPCProj\\Imported\\Finance"
 
 
+def test_apply_teams_merges_team_names_that_differ_only_in_case() -> None:
+    client = FakeClient()
+    events: list[str] = []
+    ir = {
+        "targets": {"project_name": "MSBPCProj"},
+        "counts": {"teams": 1, "area_paths": 2},
+        "project": {
+            "teams": [{"name": "Accounting"}],
+            "area_paths": [
+                {"path": "Functional areas\\Finance", "team": "Accounting"},
+                {"path": "Functional areas\\Finance\\Payables", "team": "accounting"},
+            ],
+        },
+    }
+    stats = apply_teams(client, ir, dry_run=False, emit=lambda _s, m: events.append(m))
+    assert stats["assignments"] == 1
+    assert len(client.patches) == 1
+    assert client.patches[0]["project"] == "MSBPCProj/Accounting"
+    assert {row["value"] for row in client.patches[0]["body"]["values"]} == {
+        "MSBPCProj\\Functional areas\\Finance",
+        "MSBPCProj\\Functional areas\\Finance\\Payables",
+    }
+    assert not any("no Area paths row" in m for m in events)
+
+
+def test_apply_teams_sends_include_sub_areas_from_the_teams_sheet() -> None:
+    client = FakeClient()
+    ir = {
+        "targets": {"project_name": "MSBPCProj"},
+        "counts": {"teams": 2, "area_paths": 2},
+        "project": {
+            "teams": [
+                {"name": "Accounting", "include_sub_areas": "Yes"},
+                {"name": "Business process catalog", "include_sub_areas": "No"},
+            ],
+            "area_paths": [
+                {"path": "Functional areas\\Finance", "team": "Accounting"},
+                {"path": "Business process catalog", "team": "Business process catalog"},
+            ],
+        },
+    }
+    apply_teams(client, ir, dry_run=False, emit=lambda *_: None)
+    include = {
+        patch["project"]: {row["includeChildren"] for row in patch["body"]["values"]}
+        for patch in client.patches
+    }
+    assert include == {
+        "MSBPCProj/Accounting": {True},
+        "MSBPCProj/Business process catalog": {False},
+    }
+
+
+class AreaTreeClient(FakeClient):
+    """Answers the whole-tree read; per-node existence GETs would be a regression."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gets: list[str] = []
+        self.created_areas: list[tuple[str, str]] = []
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        self.gets.append(path)
+        if path.startswith("/_apis/wit/classificationnodes/Areas?$depth="):
+            return {
+                "name": "MSBPCProj",
+                "children": [{"name": "Functional areas", "children": [{"name": "Finance"}]}],
+            }
+        return super().get(path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        if "classificationnodes" in path:
+            self.created_areas.append((path, kwargs["json_body"]["name"]))
+        return {}
+
+
+def test_apply_teams_reads_the_area_tree_once_and_creates_only_missing_nodes() -> None:
+    client = AreaTreeClient()
+    ir = {
+        "targets": {"project_name": "MSBPCProj"},
+        "counts": {"teams": 1, "area_paths": 2},
+        "project": {
+            "teams": [{"name": "Accounting"}],
+            "area_paths": [
+                {"path": "functional areas\\Finance", "team": "Accounting"},
+                {"path": "Functional areas\\Finance\\Payables", "team": "Accounting"},
+            ],
+        },
+    }
+    stats = apply_teams(client, ir, dry_run=False, emit=lambda *_: None)
+    assert client.created_areas == [
+        ("/_apis/wit/classificationnodes/Areas/Functional%20areas/Finance", "Payables")
+    ]
+    assert stats["areas"] == 1
+    assert [path for path in client.gets if "classificationnodes" in path] == [
+        "/_apis/wit/classificationnodes/Areas?$depth=14"
+    ]
+
+
 def test_apply_teams_dry_run_does_not_patch() -> None:
     client = FakeClient()
     ir = {

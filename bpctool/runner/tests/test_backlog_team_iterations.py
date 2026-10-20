@@ -155,6 +155,44 @@ def test_team_settings_payload_empty_without_root() -> None:
     assert payload == {}
 
 
+def _backlog_ir(team_names: list[str]) -> dict[str, Any]:
+    return {
+        "targets": {"project_name": "MSBPCProj", "process_name": "MSBPCTemplate"},
+        "counts": {"backlogs": 0, "iteration_paths": 2, "teams": len(team_names)},
+        "process": {"backlogs": [], "work_item_types": []},
+        "project": {
+            "iteration_paths": [
+                {"path": "Phase 1 - Initiate", "level": "1"},
+                {"path": "Phase 1 - Initiate\\Sprint 1", "level": "2"},
+            ],
+            "teams": [
+                {
+                    "name": name,
+                    "bug_behavior": "asRequirements",
+                    "include_sub_areas": "Yes",
+                    "backlog_iteration": "@currentIteration",
+                }
+                for name in team_names
+            ],
+        },
+    }
+
+
+def test_apply_backlog_parallel_teams_match_serial_counts() -> None:
+    names = [f"Team {n}" for n in range(9)]
+    serial_client = BacklogFakeClient()
+    serial = apply_backlog(serial_client, _backlog_ir(names), dry_run=False, emit=lambda *_: None)
+    parallel_client = BacklogFakeClient()
+    parallel = apply_backlog(
+        parallel_client, _backlog_ir(names), dry_run=False, emit=lambda *_: None, workers=4
+    )
+
+    assert parallel == serial
+    assert parallel["team_settings"] == 9
+    assert parallel["team_iterations"] == 9 * 2
+    assert sorted(parallel_client.team_iters) == sorted(f"MSBPCProj/{n}" for n in names)
+
+
 def test_apply_backlog_assigns_iterations_to_each_team() -> None:
     client = BacklogFakeClient()
     events: list[str] = []
