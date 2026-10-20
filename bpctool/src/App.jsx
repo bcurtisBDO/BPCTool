@@ -1167,7 +1167,7 @@ function App() {
       const message = error instanceof Error ? error.message : 'Unexpected runner error.'
       setRunMessage(
         message.startsWith('Job not found')
-          ? 'The previous runner job is no longer available (the runner was restarted).'
+          ? 'The previous runner job is no longer available (the runner was restarted, or it has finished 20 newer jobs since and keeps only the latest 20).'
           : `Stopped watching runner job: ${message}`,
       )
     } finally {

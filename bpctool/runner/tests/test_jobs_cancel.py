@@ -137,6 +137,19 @@ def test_finished_job_forgets_the_pat(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == ["x" * 52]
 
 
+def test_finished_job_keeps_one_copy_of_its_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_apply(request, *, emit, **_kwargs):
+        emit({"type": "step-progress", "stepId": "process", "message": "m"})
+        return ApplyResult(ok=True, dry_run=False, events=[{"type": "step-progress"}])
+
+    monkeypatch.setattr(jobs, "run_apply", fake_run_apply)
+    job = jobs.create_job(_request())
+    _wait_for(lambda: jobs.get_job(job.id).status == "succeeded")
+    full = jobs.get_job(job.id)
+    assert full.apply_result is not None and full.apply_result.events == []
+    assert any(event.get("message") == "m" for event in full.events)
+
+
 def test_only_recent_finished_jobs_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         jobs, "run_apply", lambda request, **_kwargs: ApplyResult(ok=True, dry_run=False)

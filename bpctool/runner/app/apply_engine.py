@@ -293,6 +293,7 @@ def run_apply(
                     emit=step_emit,
                     process_id=process_id,
                     workers=int(getattr(request, "catalog_parallel_workers", 4) or 4),
+                    process_changes=(planned.get("process") or {}).get("planned_action") != "skip",
                 )
             elif step_id == "catalog":
                 result = apply_catalog(

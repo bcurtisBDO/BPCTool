@@ -191,20 +191,29 @@ def apply_layout(
                     group_order,
                     order,
                     layout,
+                    emit=emit,
+                    wit_name=wit_name,
                 )
                 stale = True
                 if ok:
                     stats["html_controls"] += 1
                 else:
-                    emit("layout", f"HTML control {ref} on {wit_name}: failed")
                     stats["warnings"] += 1
                 continue
 
             group_id = _ensure_group(
-                client, process_id, enc_wit, page_id, section_id, layout, group_name, group_order
+                client,
+                process_id,
+                enc_wit,
+                page_id,
+                section_id,
+                layout,
+                group_name,
+                group_order,
+                emit=emit,
+                wit_name=wit_name,
             )
             if not group_id:
-                emit("layout", f"Could not ensure group '{group_name}' on {wit_name}")
                 stats["warnings"] += 1
                 continue
 
@@ -356,9 +365,12 @@ def _ensure_page(
     page = _find_page(layout, page_name)
     if page and page.get("id"):
         return page.get("id"), layout
+    layout_path = f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}/layout"
+    error: AdoError | None = None
+    page_id = None
     try:
         created = client.post(
-            f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}/layout/pages",
+            f"{layout_path}/pages",
             json_body={
                 "label": page_name,
                 "order": order,
@@ -368,27 +380,26 @@ def _ensure_page(
             api_version="7.1-preview.1",
         )
         page_id = created.get("id") if created else None
-        layout = client.get(
-            f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}/layout",
-            api_version="7.1-preview.1",
-        )
-        if not page_id:
-            page = _find_page(layout, page_name)
-            page_id = page.get("id") if page else None
-        return page_id, layout
     except AdoError as exc:
-        if exc.status in {400, 409}:
-            try:
-                layout = client.get(
-                    f"/_apis/work/processes/{process_id}/workItemTypes/{enc_wit}/layout",
-                    api_version="7.1-preview.1",
-                )
-            except AdoError:
-                return None, layout
-            page = _find_page(layout, page_name)
-            return (page.get("id") if page else None), layout
-        emit("layout", f"Could not create page '{page_name}' on {wit_name}: {exc}")
+        if exc.status not in {400, 409}:
+            emit("layout", f"Could not create page '{page_name}' on {wit_name}: {exc}")
+            return None, layout
+        # The page may already exist (e.g. an earlier request whose response was lost).
+        error = exc
+    try:
+        layout = client.get(layout_path, api_version="7.1-preview.1")
+    except AdoError as exc:
+        if page_id:
+            return page_id, layout
+        emit("layout", f"Could not re-read the layout of {wit_name} after adding page '{page_name}': {exc}")
         return None, layout
+    if not page_id:
+        page = _find_page(layout, page_name)
+        page_id = page.get("id") if page else None
+    if not page_id:
+        reason = error or "Azure DevOps returned no page id"
+        emit("layout", f"Could not create page '{page_name}' on {wit_name}: {reason}")
+    return page_id, layout
 
 
 def _add_control_to_group(
@@ -765,6 +776,9 @@ def _ensure_group(
     layout: dict[str, Any] | None,
     group_label: str,
     group_order: int = 1,
+    *,
+    emit: Emit,
+    wit_name: str,
 ) -> str | None:
     for page in (layout or {}).get("pages") or []:
         if page.get("id") != page_id:
@@ -786,9 +800,13 @@ def _ensure_group(
             },
             api_version="7.1-preview.1",
         )
-        return created.get("id") if created else None
-    except AdoError:
+    except AdoError as exc:
+        emit("layout", f"Could not create group '{group_label}' on {wit_name}: {exc}")
         return None
+    group_id = created.get("id") if created else None
+    if not group_id:
+        emit("layout", f"Group '{group_label}' on {wit_name}: Azure DevOps returned no group id")
+    return group_id
 
 
 def _add_html_control(
@@ -803,6 +821,9 @@ def _add_html_control(
     group_order: int,
     field_order: int,
     layout: dict[str, Any] | None,
+    *,
+    emit: Emit,
+    wit_name: str,
 ) -> bool:
     """HTML controls must be created inside a new group payload (reference layout behavior)."""
     if _control_exists_on_page(layout, page_id, ref):
@@ -834,6 +855,7 @@ def _add_html_control(
         )
         return True
     except AdoError as exc:
-        if exc.status in {400, 409}:
+        if exc.status == 409:
             return True
+        emit("layout", f"HTML control {ref} on {wit_name}: {exc}")
         return False

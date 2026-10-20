@@ -284,7 +284,8 @@ def _execute_job(job_id: str) -> None:
 
         with _lock:
             job = _jobs[job_id]
-            job["apply_result"] = apply_result
+            # The job's own event list already holds every event; don't keep a second copy.
+            job["apply_result"] = apply_result.model_copy(update={"events": []})
             job["result"] = apply_result.plan
             if apply_result.ok:
                 status = "succeeded"
@@ -345,9 +346,6 @@ def get_job(job_id: str, *, since: int = 0) -> JobStatusResponse:
         events = job["events"]
         offset = max(0, min(int(since or 0), len(events)))
         apply_result = job["apply_result"]
-        if apply_result is not None and offset:
-            # Incremental pollers already hold the events; don't resend them all.
-            apply_result = apply_result.model_copy(update={"events": []})
         return JobStatusResponse(
             id=job["id"],
             status=job["status"],

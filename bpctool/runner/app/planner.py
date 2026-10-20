@@ -163,6 +163,9 @@ def build_dry_run_plan(
             "summary": (
                 f"Configure {counts['backlogs']} backlog levels and "
                 f"{counts['iteration_paths']} iteration paths"
+                if process_action != "skip"
+                else f"Configure {counts['iteration_paths']} iteration paths and team settings; "
+                "the existing process's backlog levels are left as they are (skip-existing)"
             ),
         },
         {

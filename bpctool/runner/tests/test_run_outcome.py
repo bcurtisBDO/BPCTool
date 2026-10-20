@@ -193,6 +193,37 @@ def test_rehearsal_run_end_to_end_writes_summary(template_path, tmp_path) -> Non
     assert result.outcome and result.outcome["status"] == "rehearsal"
 
 
+def test_skip_existing_run_tells_backlog_to_leave_the_process_alone(
+    template_path, tmp_path, monkeypatch
+) -> None:
+    from app import apply_engine
+    from app.models import DryRunRequest
+
+    seen: dict[str, bool] = {}
+
+    def fake_backlog(_client, _ir, *, process_changes=True, **_kwargs):
+        seen["process_changes"] = process_changes
+        return {"warnings": 0}
+
+    monkeypatch.setattr(apply_engine, "apply_backlog", fake_backlog)
+    request = DryRunRequest(
+        org_url="https://dev.azure.com/contoso",
+        process_name="Business Process Catalog",
+        project_name="Contoso-BPC",
+        excel_file=str(template_path),
+        output_root=str(tmp_path),
+        update_policy="skip-existing",
+        known_process_exists=True,
+    )
+    apply_engine.run_apply(request, pat="", dry_run=True, step_filter=["backlog"])
+    assert seen == {"process_changes": False}
+
+    seen.clear()
+    fresh = request.model_copy(update={"known_process_exists": False})
+    apply_engine.run_apply(fresh, pat="", dry_run=True, step_filter=["backlog"])
+    assert seen == {"process_changes": True}
+
+
 def test_live_run_checks_ado_for_existing_targets_without_inventory(
     template_path, tmp_path, monkeypatch
 ) -> None:

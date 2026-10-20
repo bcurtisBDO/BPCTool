@@ -81,7 +81,7 @@ Re-runs against an existing org/process/project are supported, but “incrementa
 |--------|----------|
 | **Require confirmation** | Fail plan/apply if process/project exists and confirm boxes are unchecked (process: Process, Layout or Backlog step; project: Project step) |
 | **Always update** | Proceed; writers reuse/update existing targets (still create-if-missing, not full rewrite) |
-| **Skip existing** | Skip process (and layout with it) and/or project (and teams/backlog with it) when targets exist |
+| **Skip existing** | Skip process (and layout with it) and/or project (and teams/backlog with it) when targets exist. An existing process with a new project: Backlog runs only its project part (iterations, team settings) and leaves the process's backlog levels and WIT assignments alone |
 | **Create only** | Fail if selected process/project already exists |
 
 Catalog is **not** gated by update policy.

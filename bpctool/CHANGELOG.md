@@ -32,6 +32,10 @@ All notable changes to BPCTool (React UI + local runner) are documented here.
 - Backlog configures teams in parallel, using the **Catalog workers** setting (the August run spent about 3 minutes on team settings one team at a time)
 - Preview plan is about twice as fast on first run (about 2.1 s → 1.2 s for the July catalog) and about three times faster on repeat (about 0.65 s): each catalog workbook is read once and reused until the file changes, header names are no longer re-normalized for every row, and the required-field list is built once
 - The runner forgets a job's PAT as soon as the job ends, and keeps only the 20 most recent finished jobs (with their event logs) instead of every job since it started
+- Fix: Cancel during **Backlog** now stops promptly — with teams configured in parallel, every team still queued went on to change its settings after Cancel; now only teams already in progress finish
+- Fix: under **Skip steps for existing targets**, an existing process with a new project still had its backlog levels renamed, created or deleted by the Backlog step. Backlog now leaves the process alone in that case and only sets up iterations and team settings; Preview plan says so
+- Fix: Page Layout treated a 400 when adding an HTML control as success; it is now a warning with the Azure DevOps reason. Warnings for a group or page that couldn't be created now include the reason too
+- Finished jobs no longer keep a second copy of their event log in the stored result (the job's own event list has every event); after a page reload, a job the runner no longer has says it may have been dropped as one of the oldest
 - Removed `docs/reference/MSBPC-process-analysis.md` (a snapshot of the process from one template release, 2026-08-09) and its links in the README and workflow comparison
 - UI hints for **Rehearsal only** and **Root area path**, User Guide, README and workflow comparison updated for the read-only rehearsal and change report; screenshots retaken (connection, actions, rehearsal, results card)
 

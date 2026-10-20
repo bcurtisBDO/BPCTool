@@ -6,6 +6,7 @@ bug behavior / backlog iteration and POST every iteration onto the team.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import quote
@@ -23,8 +24,13 @@ def apply_backlog(
     emit: Emit,
     process_id: str | None = None,
     workers: int = 1,
+    process_changes: bool = True,
 ) -> dict[str, Any]:
-    """``workers`` > 1 configures teams in parallel (each team's requests stay in order)."""
+    """``workers`` > 1 configures teams in parallel (each team's requests stay in order).
+
+    ``process_changes=False`` (skip-existing on an existing process) leaves the process's
+    backlog levels and WIT assignments alone and only sets up iterations and teams.
+    """
     project = ir["targets"]["project_name"]
     process_name = ir["targets"]["process_name"]
     stats = {
@@ -45,29 +51,40 @@ def apply_backlog(
     )
 
     if dry_run:
+        process_part = (
+            f"configure {ir['counts']['backlogs']} backlog levels "
+            f"(rename/create from Backlogs sheet), assign {enabled_wit_backlogs} WITs, "
+            if process_changes
+            else "leave the existing process's backlog levels as they are (skip-existing), "
+        )
         emit(
             "backlog",
-            f"[dry-run] Would configure {ir['counts']['backlogs']} backlog levels "
-            f"(rename/create from Backlogs sheet), assign {enabled_wit_backlogs} WITs, "
+            f"[dry-run] Would {process_part}"
             f"create {ir['counts']['iteration_paths']} iterations, and assign iterations "
             f"to {ir['counts']['teams']} teams. No Azure DevOps teamsettings changes.",
         )
         return {
             **stats,
-            "behaviors": int(ir["counts"].get("backlogs") or 0),
-            "wit_assignments": enabled_wit_backlogs,
+            "behaviors": int(ir["counts"].get("backlogs") or 0) if process_changes else 0,
+            "wit_assignments": enabled_wit_backlogs if process_changes else 0,
             "iterations": int(ir["counts"].get("iteration_paths") or 0),
             "team_settings": int(ir["counts"].get("teams") or 0),
             "dry_run": True,
         }
 
-    process_id = process_id or client.get_process_id(process_name)
-    if not process_id:
-        raise AdoError(f'Process "{process_name}" not found for backlog apply.')
-
-    backlog_refs = _configure_backlog_levels(client, ir, process_id, stats, emit)
-    _assign_wits_to_backlogs(client, ir, process_id, backlog_refs, stats, emit)
-    _set_default_wits(client, ir, process_id, backlog_refs, stats, emit)
+    if process_changes:
+        process_id = process_id or client.get_process_id(process_name)
+        if not process_id:
+            raise AdoError(f'Process "{process_name}" not found for backlog apply.')
+        backlog_refs = _configure_backlog_levels(client, ir, process_id, stats, emit)
+        _assign_wits_to_backlogs(client, ir, process_id, backlog_refs, stats, emit)
+        _set_default_wits(client, ir, process_id, backlog_refs, stats, emit)
+    else:
+        emit(
+            "backlog",
+            f"Process '{process_name}' already exists and the policy is skip-existing: "
+            "its backlog levels and work item type assignments were left as they are",
+        )
     _create_iteration_nodes(client, ir, project, stats, emit)
 
     tree = _fetch_iteration_tree(client, project, emit)
@@ -788,16 +805,25 @@ def _configure_team_iterations(
         emit("backlog", "No teams in IR; skipping team iteration assignment")
         return
 
+    # Set when a team raises (e.g. the run was cancelled from emit), so queued teams don't start.
+    stop = threading.Event()
+
     def configure(team: dict[str, Any]) -> dict[str, int]:
-        return _configure_one_team(
-            client,
-            team,
-            project,
-            root_id=root_id,
-            iteration_map=iteration_map,
-            child_ids=child_ids,
-            emit=emit,
-        )
+        if stop.is_set():
+            return {}
+        try:
+            return _configure_one_team(
+                client,
+                team,
+                project,
+                root_id=root_id,
+                iteration_map=iteration_map,
+                child_ids=child_ids,
+                emit=emit,
+            )
+        except BaseException:
+            stop.set()
+            raise
 
     pool_size = max(1, min(workers, len(teams)))
     if pool_size == 1:

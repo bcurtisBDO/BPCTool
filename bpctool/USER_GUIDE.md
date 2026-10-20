@@ -208,7 +208,7 @@ Existing projects and processes load automatically once the org URL and PAT are 
 |--------|----------|
 | Require confirmation before update | If process/project already exists, you must check confirm boxes |
 | Always update existing targets | Proceed with update/reuse |
-| Skip steps for existing targets | Skip process/project phases when targets exist |
+| Skip steps for existing targets | Skip process/project phases when targets exist. With an existing process and a new project, Backlog still sets up iterations and team settings but leaves the process's backlog levels and type assignments as they are |
 | Create only (fail if exists) | Fail planning/apply if targets already exist |
 
 6. If policy requires it and the name matches inventory, check **Confirm process update** / **Confirm project update**

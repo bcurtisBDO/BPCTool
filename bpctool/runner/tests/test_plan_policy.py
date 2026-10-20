@@ -38,6 +38,15 @@ def test_backlog_only_run_is_refused_by_create_only(ir) -> None:
     assert any("already exists and policy is create-only" in error for error in plan.errors)
 
 
+def test_skip_existing_keeps_backlog_for_the_new_project_only(ir) -> None:
+    plan = _plan(ir, "skip-existing", ["process", "layout", "project", "teams", "backlog"])
+    steps = {step["id"]: step for step in plan.steps}
+    assert plan.ok
+    assert steps["process"]["planned_action"] == "skip"
+    assert steps["backlog"]["planned_action"] == "update"
+    assert "backlog levels are left as they are" in steps["backlog"]["summary"]
+
+
 def test_teams_only_run_does_not_need_process_confirmation(ir) -> None:
     assert _plan(ir, "require-confirmation", ["teams"]).ok
 

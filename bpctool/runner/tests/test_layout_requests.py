@@ -166,6 +166,45 @@ def test_field_rejected_with_400_is_reported_not_treated_as_present() -> None:
     assert any("Add field MSBPC.field1" in message for message in events)
 
 
+class RejectingLayoutClient(CountingLayoutClient):
+    def __init__(self, reject: str, **kwargs: Any) -> None:
+        super().__init__(wit_fields=[], controls=[], **kwargs)
+        self.reject = reject
+
+    def post(self, path: str, json_body: Any = None, **kwargs: Any) -> dict[str, Any]:
+        if path.endswith(self.reject):
+            raise AdoError("VS402500: rejected", status=400)
+        return super().post(path, json_body, **kwargs)
+
+
+def test_html_control_rejected_with_400_is_a_warning() -> None:
+    field = dict(_field(1, field_type="html"), is_html=True)
+    client = RejectingLayoutClient("/groups")
+    stats, events = _run(client, _ir([field]))
+
+    assert stats["html_controls"] == 0
+    assert stats["warnings"] == 1
+    assert any("HTML control MSBPC.field1 on Workshop: VS402500" in m for m in events)
+
+
+def test_group_failure_reports_the_azure_devops_reason() -> None:
+    field = dict(_field(1), group_name="New group")
+    client = RejectingLayoutClient("/groups")
+    stats, events = _run(client, _ir([field]))
+
+    assert stats["warnings"] == 1
+    assert any("Could not create group 'New group' on Workshop: VS402500" in m for m in events)
+
+
+def test_page_rejected_and_still_missing_reports_the_reason() -> None:
+    field = dict(_field(1), page_name="Extra")
+    client = RejectingLayoutClient("/pages")
+    stats, events = _run(client, _ir([field]))
+
+    assert stats["warnings"] == 1
+    assert any("Could not create page 'Extra' on Workshop: VS402500" in m for m in events)
+
+
 def test_already_exists_message_counts_as_present() -> None:
     client = CountingLayoutClient(
         wit_fields=[],
