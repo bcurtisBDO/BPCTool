@@ -143,7 +143,7 @@ npm start        # UI + auto-started runner; opens browser
 | How | What happens |
 |-----|----------------|
 | Double-click `Start BPCTool.command` / `.bat` | Setup if needed → start UI → auto-start runner → open browser |
-| `npm start` | Same as above (without the setup wrapper) |
+| `npm start` | Same as above; if `.venv` is missing (fresh clone or copy) it runs the Python part of setup first, logged as `[bpc-setup]` lines |
 
 The Vite process starts the FastAPI runner on `127.0.0.1:8787` via `scripts/localRunnerPlugin.js` (with `--reload`). An idle BPCTool runner already on `8787` (e.g. left over from an earlier session) is replaced; one with a run in progress is reused as-is so the run isn't cut off — relaunch after it finishes to load code changes. If a different program owns `8787`, the launcher leaves it alone and logs *Port 8787 is in use by another program*. Closing the start window / stopping Vite also stops the runner it started.
 
@@ -666,15 +666,15 @@ Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name
 
 ### Runner unreachable / Preview plan fails
 
-**Symptom:** “Failed to reach local runner” or fetch to `/api/...` errors.
+**Symptom:** “Can't reach the local runner” in the status line, path picker, or after Preview plan / Run (older builds showed “Failed to fetch”). The terminal shows `http proxy error … ECONNREFUSED 127.0.0.1:8787`.
 
 **Fix:**
 
-1. Quit the Start BPCTool window and relaunch (or `npm start`)
-2. On first use, wait for setup to finish creating `.venv`
-3. Confirm `curl http://127.0.0.1:8787/health`
-4. Ensure nothing else owns port `8787`
-5. Run `npm run setup` once if the venv was never created
+1. On first launch, wait for `[bpc-runner] Ready.` in the terminal window — the launcher creates `.venv` first (about a minute; `[bpc-setup]` lines). The page loads the runner defaults once the runner answers
+2. If the terminal shows `[bpc-runner] First-launch setup failed` or *Python 3 is required*, install Python 3.11+, run `npm run setup` in `bpctool/`, then relaunch
+3. Otherwise quit the Start BPCTool window and relaunch (or `npm start`)
+4. Confirm `curl http://127.0.0.1:8787/health`
+5. Ensure nothing else owns port `8787`
 
 ### Port already in use
 

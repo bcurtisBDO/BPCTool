@@ -59,6 +59,36 @@ function resolveUvicorn() {
   return candidates.find((candidate) => existsSync(candidate)) || null
 }
 
+/** First launch from a fresh copy (e.g. `npm start` without Start BPCTool): create the venv. */
+function runSetup(logger = console) {
+  return new Promise((resolve, reject) => {
+    const setup = spawn(process.execPath, [path.join(__dirname, 'ensure-env.mjs')], {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const relay = (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        if (line.trim()) logger.info?.(`[bpc-setup] ${line.trim()}`)
+      }
+    }
+    setup.stdout?.on('data', relay)
+    setup.stderr?.on('data', relay)
+    setup.on('error', reject)
+    setup.on('exit', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(
+          new Error(
+            `First-launch setup failed (exit ${code}); see the [bpc-setup] lines above. ` +
+              'Python 3 must be installed and on PATH; then run: npm run setup',
+          ),
+        )
+      }
+    })
+  })
+}
+
 function waitForHealth(timeoutMs = 20000) {
   const started = Date.now()
   return new Promise((resolve, reject) => {
@@ -217,10 +247,17 @@ export function localRunnerPlugin() {
       await sleep(400)
     }
 
-    const uvicorn = resolveUvicorn()
+    let uvicorn = resolveUvicorn()
+    if (!uvicorn) {
+      logger.info?.(
+        '[bpc-runner] Python runner venv not found — running first-launch setup (about a minute)...',
+      )
+      await runSetup(logger)
+      uvicorn = resolveUvicorn()
+    }
     if (!uvicorn) {
       throw new Error(
-        'Python runner venv not found. Double-click "Start BPCTool" or run: npm run setup',
+        'Python runner venv still not found after setup. Double-click "Start BPCTool" or run: npm run setup',
       )
     }
 

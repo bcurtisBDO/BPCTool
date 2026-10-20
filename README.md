@@ -44,7 +44,7 @@ From a terminal instead:
 
 ```bash
 cd bpctool
-npm run setup   # once: node_modules + .venv
+npm run setup   # once: node_modules + .venv (npm start also creates .venv if missing)
 npm start       # UI + auto-started runner (opens the browser)
 ```
 

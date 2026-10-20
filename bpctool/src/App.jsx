@@ -23,6 +23,8 @@ import {
   buildRunnerJobBody,
   cancelRunnerJob,
   pollRunnerJob,
+  RUNNER_UNREACHABLE,
+  runnerFetch,
   runRunnerJob,
 } from './runnerApi'
 import {
@@ -298,11 +300,12 @@ function App() {
 
   const loadRunnerDefaults = async ({ onlyEmpty = false } = {}) => {
     try {
-      const response = await fetch('/api/defaults')
+      const response = await runnerFetch('/api/defaults')
       if (!response.ok) {
         throw new Error(`Runner defaults unavailable (${response.status})`)
       }
       const defaults = await response.json()
+      setRunMessage((current) => (current === RUNNER_UNREACHABLE ? 'No action run yet.' : current))
       if (defaults.output_root) {
         setOutputRoot(defaults.output_root)
       }
@@ -333,8 +336,12 @@ function App() {
         )
       }
     } catch (error) {
+      if (error instanceof Error && error.message === RUNNER_UNREACHABLE) {
+        setRunMessage(RUNNER_UNREACHABLE)
+        return false
+      }
       if (onlyEmpty) {
-        return
+        return true
       }
       const message =
         error instanceof Error
@@ -342,6 +349,7 @@ function App() {
           : 'Failed to reach local runner. Quit and relaunch Start BPCTool (or npm start).'
       setRunMessage(`Could not load runner defaults: ${message}`)
     }
+    return true
   }
 
   const setOrgUrl = (value) => {
@@ -1145,11 +1153,27 @@ function App() {
     }
   }
 
+  const loadRunnerDefaultsRef = useRef(loadRunnerDefaults)
   useEffect(() => {
-    const timer = setTimeout(() => loadRunnerDefaults({ onlyEmpty: true }), 0)
-    return () => clearTimeout(timer)
+    loadRunnerDefaultsRef.current = loadRunnerDefaults
+  })
+
+  useEffect(() => {
     // Mount-only: prefill paths from the runner without overwriting user input.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The runner may still be starting (first launch sets up Python), so keep trying.
+    let cancelled = false
+    let timer
+    const attempt = async (triesLeft) => {
+      const reached = await loadRunnerDefaultsRef.current({ onlyEmpty: true })
+      if (!reached && !cancelled && triesLeft > 0) {
+        timer = setTimeout(() => attempt(triesLeft - 1), 3000)
+      }
+    }
+    timer = setTimeout(() => attempt(60), 0)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -1185,7 +1209,7 @@ function App() {
     setRunMessage('Building plan preview from the workbooks (no Azure DevOps changes)...')
 
     try {
-      const response = await fetch('/api/plan/dry-run', {
+      const response = await runnerFetch('/api/plan/dry-run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
