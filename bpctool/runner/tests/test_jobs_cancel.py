@@ -74,6 +74,55 @@ def test_get_job_since_returns_only_new_events(monkeypatch: pytest.MonkeyPatch) 
     assert beyond.event_offset == full.event_total
 
 
+def test_second_apply_for_same_project_is_rejected_until_first_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = {"go": False}
+
+    def fake_run_apply(request, **_kwargs):
+        _wait_for(lambda: release["go"])
+        return ApplyResult(ok=True, dry_run=False)
+
+    monkeypatch.setattr(jobs, "run_apply", fake_run_apply)
+    first = jobs.create_job(_request())
+    same_project = _request().model_copy(
+        update={"org_url": "https://dev.azure.com/Contoso/", "project_name": "demo project"}
+    )
+    with pytest.raises(jobs.ApplyInProgressError, match=first.id):
+        jobs.create_job(same_project)
+    other = jobs.create_job(_request().model_copy(update={"project_name": "Other Project"}))
+    assert jobs.active_job_count() == 2
+
+    release["go"] = True
+    _wait_for(lambda: jobs.get_job(first.id).status == "succeeded")
+    _wait_for(lambda: jobs.get_job(other.id).status == "succeeded")
+    again = jobs.create_job(same_project)
+    _wait_for(lambda: jobs.get_job(again.id).status == "succeeded")
+
+
+def test_crashed_apply_releases_its_slot_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    def crash(request, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(jobs, "run_apply", crash)
+    failed = jobs.create_job(_request())
+    _wait_for(lambda: jobs.get_job(failed.id).status == "failed")
+    assert jobs.get_job(failed.id).error == "boom"
+
+    release = {"go": False}
+    monkeypatch.setattr(
+        jobs,
+        "run_apply",
+        lambda request, **_kwargs: _wait_for(lambda: release["go"]) or ApplyResult(ok=True, dry_run=False),
+    )
+    running = jobs.create_job(_request())
+    jobs._release_apply_key(failed.id)
+    with pytest.raises(jobs.ApplyInProgressError):
+        jobs.create_job(_request())
+    release["go"] = True
+    _wait_for(lambda: jobs.get_job(running.id).status == "succeeded")
+
+
 def test_cancel_finished_job_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         jobs, "run_apply", lambda request, **_kwargs: ApplyResult(ok=True, dry_run=False)

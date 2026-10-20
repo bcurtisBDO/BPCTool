@@ -75,6 +75,22 @@ def build_dry_run_plan(
     touches_process = bool(selected & {"process", "layout"})
     touches_project_create = "project" in selected
 
+    unchecked = [
+        label
+        for label, known, touched in (
+            ("process", known_process_exists, touches_process),
+            ("project", known_project_exists, touches_project_create),
+        )
+        if known is None and touched
+    ]
+    if unchecked and update_policy != "always-update":
+        warnings.append(
+            f"Not known whether the {' and '.join(unchecked)} already exist"
+            f"{'s' if len(unchecked) == 1 else ''} (existing list not fetched), so this plan treats "
+            f"{'it as' if len(unchecked) == 1 else 'them as'} new. A live run checks Azure DevOps "
+            "and applies the existing target policy then."
+        )
+
     # Policy gates (UI also validates; runner enforces).
     # Scope confirmations to steps that will actually run so selected-step
     # re-runs (e.g. teams-only) are not blocked by process/project confirms.

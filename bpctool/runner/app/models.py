@@ -51,6 +51,13 @@ class DryRunRequest(BaseModel):
             "multilineFieldsFormat=Markdown on create."
         ),
     )
+    include_deprecated_deleted: bool = Field(
+        default=False,
+        description=(
+            "Import catalog rows whose Catalog status is Deprecated or Deleted (and the rows "
+            "below them). Default false skips them, as the Microsoft importer does."
+        ),
+    )
     output_root: str | None = Field(
         default=None,
         description=(

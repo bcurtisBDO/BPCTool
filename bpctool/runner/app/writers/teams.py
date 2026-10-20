@@ -97,27 +97,22 @@ def apply_teams(
 
     allowed = set(existing_teams.keys()) | seen
 
+    # A Root area path below the project (e.g. "Proj\Imported") holds the workbook's area tree.
+    root_parts = _relative_area_parts(root, project)
+    if root_parts:
+        _ensure_area_chain(client, project, root_parts, stats, emit)
+
     # Create area nodes and collect per-team path sets (do not PATCH per row).
     team_assignments: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"default": None, "paths": set()}
     )
 
     for area in ir["project"]["area_paths"]:
-        parts = _relative_area_parts(area.get("path") or "", project)
-        if not parts:
+        relative_parts = _relative_area_parts(area.get("path") or "", project)
+        if not relative_parts:
             continue
-        parent: list[str] = []
-        for name in parts:
-            current = parent + [name]
-            if not _area_exists(client, project, current):
-                try:
-                    _create_area(client, project, parent, name)
-                    stats["areas"] += 1
-                except AdoError as exc:
-                    if exc.status not in {409}:
-                        emit("teams", f"Area {'/'.join(current)}: {exc}")
-                        stats["warnings"] += 1
-            parent = current
+        parts = root_parts + relative_parts
+        _ensure_area_chain(client, project, parts, stats, emit)
 
         team_name = (area.get("team") or "").strip()
         if not team_name:
@@ -184,6 +179,27 @@ def _relative_area_parts(path: str, project: str) -> list[str]:
     while parts and parts[0].lower() in {project.lower(), "project name"}:
         parts = parts[1:]
     return parts
+
+
+def _ensure_area_chain(
+    client: AdoClient,
+    project: str,
+    parts: list[str],
+    stats: dict[str, Any],
+    emit: Emit,
+) -> None:
+    parent: list[str] = []
+    for name in parts:
+        current = parent + [name]
+        if not _area_exists(client, project, current):
+            try:
+                _create_area(client, project, parent, name)
+                stats["areas"] += 1
+            except AdoError as exc:
+                if exc.status not in {409}:
+                    emit("teams", f"Area {'/'.join(current)}: {exc}")
+                    stats["warnings"] += 1
+        parent = current
 
 
 def _area_exists(client: AdoClient, project: str, parts: list[str]) -> bool:

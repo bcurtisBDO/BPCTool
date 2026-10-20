@@ -16,7 +16,8 @@ function run(command, args, opts = {}) {
   const result = spawnSync(command, args, {
     cwd: ROOT,
     stdio: 'inherit',
-    shell: isWin,
+    // Only .cmd shims need cmd.exe; a shell would split executable paths that contain spaces.
+    shell: isWin && command.toLowerCase().endsWith('.cmd'),
     ...opts,
   })
   if (result.status !== 0) {

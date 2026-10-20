@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from app.ado_client import AdoError
 from app.writers.project import apply_project
 
 
 class FakeClient:
-    def __init__(self, *, existing_id: str | None = None) -> None:
+    def __init__(
+        self, *, existing_id: str | None = None, existing_process: str = "proc-guid"
+    ) -> None:
         self.existing_id = existing_id
+        self.existing_process = existing_process
         self.created: dict[str, Any] | None = None
         self.updated: dict[str, Any] | None = None
 
@@ -18,6 +24,12 @@ class FakeClient:
 
     def get_project_id(self, _name: str) -> str | None:
         return self.existing_id
+
+    def get_project_process_id(self, _project_id: str) -> str:
+        return self.existing_process
+
+    def list_processes(self) -> list[dict[str, Any]]:
+        return [{"typeId": "proc-guid", "name": "MSBPCTemplate"}, {"typeId": "agile-guid", "name": "Agile"}]
 
     def create_project(
         self, project_name: str, process_id: str, *, description: str = ""
@@ -83,3 +95,11 @@ def test_existing_project_updates_description_when_provided() -> None:
         "description": "Updated overview text",
     }
     assert client.created is None
+
+
+def test_existing_project_on_another_process_is_rejected() -> None:
+    client = FakeClient(existing_id="proj-existing", existing_process="AGILE-GUID")
+    ir = {"targets": {"project_name": "MSBPCProj", "process_name": "MSBPCTemplate"}}
+    with pytest.raises(AdoError, match='uses process "Agile", not "MSBPCTemplate"'):
+        apply_project(client, ir, dry_run=False, emit=lambda _s, _m: None)
+    assert client.updated is None

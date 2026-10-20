@@ -2,8 +2,9 @@
  * Vite plugin: start/stop the local FastAPI runner with the UI so users do not
  * need a second terminal (`npm run runner`).
  *
- * Always (re)starts an owned uvicorn with --reload so writer/code changes are
- * picked up. A stale process on :8787 is terminated first.
+ * (Re)starts an owned uvicorn with --reload so writer/code changes are picked
+ * up. An idle BPCTool runner on :8787 is replaced; one with a run in progress
+ * is reused, and an unrelated program on the port is left alone.
  */
 import { execSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -87,16 +88,39 @@ function waitForHealth(timeoutMs = 20000) {
   })
 }
 
-function probeHealth() {
+/**
+ * What is listening on the runner port: null (nothing), or { bpctool, activeJobs }.
+ * activeJobs is null for BPCTool runners from before /health reported it.
+ */
+export function describeListener(statusCode, body) {
+  let health
+  try {
+    health = JSON.parse(body)
+  } catch {
+    health = null
+  }
+  const bpctool =
+    statusCode === 200 && health?.status === 'ok' && 'teams_writer_mtime' in health
+  return {
+    bpctool,
+    activeJobs: bpctool && typeof health.active_jobs === 'number' ? health.active_jobs : null,
+  }
+}
+
+function probeListener() {
   return new Promise((resolve) => {
     const req = http.get(HEALTH, (res) => {
-      res.resume()
-      resolve(res.statusCode === 200)
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => {
+        body += chunk
+      })
+      res.on('end', () => resolve(describeListener(res.statusCode, body)))
     })
-    req.on('error', () => resolve(false))
+    req.on('error', () => resolve(null))
     req.setTimeout(800, () => {
       req.destroy()
-      resolve(false)
+      resolve(null)
     })
   })
 }
@@ -168,9 +192,27 @@ export function localRunnerPlugin() {
   }
 
   const start = async (logger = console) => {
-    // Never reuse a foreign/stale runner — it will serve old writer code without --reload.
-    if (await probeHealth()) {
-      logger.info?.(`[bpc-runner] Replacing existing listener on :${PORT}`)
+    const listener = await probeListener()
+    if (listener && !listener.bpctool) {
+      throw new Error(
+        `Port ${PORT} is in use by another program. Close it, then restart BPCTool.`,
+      )
+    }
+    if (listener?.activeJobs > 0) {
+      logger.warn?.(
+        `[bpc-runner] The BPCTool runner already on :${PORT} has ${listener.activeJobs} run(s) in ` +
+          'progress; using it as-is. Restart BPCTool after the run finishes to load code changes.',
+      )
+      return
+    }
+    if (listener) {
+      // A runner from an earlier session would serve old writer code without --reload. Older
+      // builds can't report runs in progress; keeping them would hide every later fix.
+      logger.info?.(
+        listener.activeJobs === null
+          ? `[bpc-runner] Replacing a BPCTool runner from an older version on :${PORT} (it can't report runs in progress)`
+          : `[bpc-runner] Replacing idle BPCTool runner on :${PORT}`,
+      )
       freeRunnerPort(logger)
       await sleep(400)
     }

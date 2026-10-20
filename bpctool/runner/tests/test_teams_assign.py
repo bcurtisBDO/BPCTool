@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.ado_client import AdoError
 from app.writers.teams import _assign_team_areas, _format_area_path, apply_teams
 
 
@@ -99,6 +100,43 @@ def test_apply_teams_assigns_each_mapped_team() -> None:
     bpc = next(p for p in client.patches if p["project"] == "MSBPCProj/Business process catalog")
     assert len(bpc["body"]["values"]) == 2
     assert any("Assigned team 'Business process catalog'" in m for m in events)
+
+
+class EmptyAreasClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.created_areas: list[tuple[str, str]] = []
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        if "classificationnodes" in path:
+            if path not in {f"{parent}/{name}" for parent, name in self.created_areas}:
+                raise AdoError("not found", status=404)
+            return {"name": "ok"}
+        return super().get(path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        if "classificationnodes" in path:
+            self.created_areas.append((path, kwargs["json_body"]["name"]))
+        return {}
+
+
+def test_apply_teams_nests_areas_under_root_area_path() -> None:
+    client = EmptyAreasClient()
+    ir = {
+        "targets": {"project_name": "MSBPCProj"},
+        "counts": {"teams": 1, "area_paths": 1},
+        "project": {
+            "teams": [{"name": "Accounting"}],
+            "area_paths": [{"path": "MSBPCProj\\Finance", "team": "Accounting"}],
+        },
+    }
+    apply_teams(client, ir, dry_run=False, emit=lambda *_: None, root_area_path="MSBPCProj\\Imported")
+    assert client.created_areas == [
+        ("/_apis/wit/classificationnodes/Areas", "Imported"),
+        ("/_apis/wit/classificationnodes/Areas/Imported", "Finance"),
+    ]
+    body = client.patches[0]["body"]
+    assert body["defaultValue"] == "MSBPCProj\\Imported\\Finance"
 
 
 def test_apply_teams_dry_run_does_not_patch() -> None:

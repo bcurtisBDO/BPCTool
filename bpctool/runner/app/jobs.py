@@ -17,15 +17,31 @@ from .models import (
     JobCreateRequest,
     JobStatusResponse,
 )
-from .catalog_import import load_catalog_drafts
+from .catalog_import import load_catalog_drafts, split_retired_drafts
 from .catalog_validate import prevalidate_catalog_drafts, prevalidate_summary
 from .mapping import build_mapping_from_ir
+from .org_url import normalize_ado_org_url
 from .planner import build_dry_run_plan
 from .run_outcome import catalog_placeholder_count, project_name_notice
 from .timing import format_duration_ms
 
 _lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
+# One apply per org/project at a time: two concurrent runs would create duplicate
+# work items (both miss each other's ado-id-map.csv rows) and overwrite reports.
+_active_apply_keys: dict[str, str] = {}
+
+
+class ApplyInProgressError(RuntimeError):
+    """An apply is already running for the same organization and project."""
+
+
+def _apply_key(request: JobCreateRequest) -> str:
+    try:
+        org = normalize_ado_org_url(request.org_url).lower()
+    except ValueError:
+        org = (request.org_url or "").strip().lower()
+    return f"{org}|{(request.project_name or '').strip().lower()}"
 
 
 def _now() -> str:
@@ -50,7 +66,17 @@ def run_dry_run(request: DryRunRequest) -> DryRunResponse:
         step_filter=request.steps,
     )
     if (not request.steps or "catalog" in request.steps) and ir["counts"].get("catalog_rows"):
-        plan.data_checks = catalog_data_checks(ir)
+        plan.data_checks = catalog_data_checks(
+            ir,
+            area_root=request.root_area_path or request.project_name,
+            include_deprecated_deleted=request.include_deprecated_deleted,
+        )
+        retired = int(plan.data_checks.get("retiredSkipped") or 0)
+        if retired:
+            plan.notices.append(
+                f"{retired:,} Deprecated / Deleted catalog row(s) (or rows below them) will be skipped — "
+                "tick “Import Deprecated / Deleted rows” to include them."
+            )
     notice = project_name_notice(
         request.project_name,
         template_rows=int((ir.get("project") or {}).get("project_placeholders_replaced") or 0),
@@ -61,12 +87,17 @@ def run_dry_run(request: DryRunRequest) -> DryRunResponse:
     return plan
 
 
-def catalog_data_checks(ir: dict[str, Any]) -> dict[str, Any]:
-    """Offline catalog checks (no Azure DevOps calls); States are checked on live runs."""
+def catalog_data_checks(
+    ir: dict[str, Any], *, area_root: str = "", include_deprecated_deleted: bool = False
+) -> dict[str, Any]:
+    """Offline catalog checks (no Azure DevOps calls); project areas and States need a run."""
     mapping = build_mapping_from_ir(ir)
     drafts = load_catalog_drafts(ir["source"].get("catalog_source_dir"), mapping)
-    result = prevalidate_catalog_drafts(drafts, ir, mapping, sanitize=True)
-    return prevalidate_summary(result, examples=3)
+    retired = []
+    if not include_deprecated_deleted:
+        drafts, retired = split_retired_drafts(drafts)
+    result = prevalidate_catalog_drafts(drafts, ir, mapping, sanitize=True, area_root=area_root)
+    return {**prevalidate_summary(result, examples=3), "retiredSkipped": len(retired)}
 
 
 def create_job(request: JobCreateRequest) -> JobStatusResponse:
@@ -74,6 +105,7 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
         raise ValueError("PAT is required for apply mode.")
 
     job_id = uuid.uuid4().hex[:12]
+    apply_key = _apply_key(request) if request.mode == "apply" else None
     created = _now()
     record = {
         "id": job_id,
@@ -96,8 +128,18 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
         ],
         "request": request,
         "cancel_event": threading.Event(),
+        "apply_key": apply_key,
     }
     with _lock:
+        if apply_key is not None:
+            running = _active_apply_keys.get(apply_key)
+            if running is not None:
+                raise ApplyInProgressError(
+                    f"A run is already in progress for this organization and project (job {running}). "
+                    "Wait for it to finish, or cancel it, before starting another — two runs at once "
+                    "would create duplicate work items and overwrite each other's reports."
+                )
+            _active_apply_keys[apply_key] = job_id
         _jobs[job_id] = record
 
     if request.mode == "dry-run":
@@ -108,6 +150,20 @@ def create_job(request: JobCreateRequest) -> JobStatusResponse:
     thread = threading.Thread(target=_execute_job, args=(job_id,), daemon=True)
     thread.start()
     return get_job(job_id)
+
+
+def _release_apply_key(job_id: str) -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        apply_key = job.get("apply_key") if job else None
+        if apply_key is not None and _active_apply_keys.get(apply_key) == job_id:
+            del _active_apply_keys[apply_key]
+
+
+def active_job_count() -> int:
+    """Jobs queued or running (reported by /health so launchers don't stop a live run)."""
+    with _lock:
+        return sum(1 for job in _jobs.values() if job["status"] in {"queued", "running"})
 
 
 def _append_event(job_id: str, event: dict[str, Any]) -> None:
@@ -186,16 +242,20 @@ def _execute_job(job_id: str) -> None:
         def on_event(event: dict[str, Any]) -> None:
             _append_event(job_id, event)
 
-        apply_result: ApplyResult = run_apply(
-            request,
-            pat=request.pat or "",
-            dry_run=bool(request.apply_dry_run),
-            emit=on_event,
-            step_filter=request.steps,
-            catalog_limit=request.catalog_limit,
-            should_cancel=cancel_event.is_set,
-            run_id=job_id,
-        )
+        try:
+            apply_result: ApplyResult = run_apply(
+                request,
+                pat=request.pat or "",
+                dry_run=bool(request.apply_dry_run),
+                emit=on_event,
+                step_filter=request.steps,
+                catalog_limit=request.catalog_limit,
+                should_cancel=cancel_event.is_set,
+                run_id=job_id,
+            )
+        finally:
+            # Before the job reads as finished, so an immediate next run isn't refused.
+            _release_apply_key(job_id)
 
         finished = _now()
         # Prefer apply-engine total (step wall time); fall back to job wall clock.

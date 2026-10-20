@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .ado_client import AdoClient
+from .ado_client import AdoClient, ReadOnlyAdoClient
 from .excel_ir import build_ir
 from .models import ApplyResult, DryRunRequest, DryRunResponse
 from .org_url import normalize_ado_org_url, parse_ado_org_url
@@ -91,15 +91,55 @@ def run_apply(
     ir.setdefault("targets", {})["project_description"] = (
         request.project_description or ""
     ).strip()
+    org_url = normalize_ado_org_url(request.org_url)
+    # Writers get no client in a rehearsal; the catalog change report gets a read-only one.
+    client = None if dry_run else AdoClient(org_url, pat)
+    change_reader: ReadOnlyAdoClient | None = None
+    if dry_run and pat.strip():
+        try:
+            change_reader = ReadOnlyAdoClient(org_url, pat)
+        except ValueError:
+            change_reader = None
+
+    process_exists = request.known_process_exists
+    project_exists = request.known_project_exists
+    # (target, list the browser sent: None = not loaded, False = loaded without it)
+    unlisted: list[tuple[str, bool | None]] = []
+    if client:
+        # The browser's inventory is optional and can be stale; policy gates use what ADO reports.
+        process_exists = client.get_process_id(request.process_name) is not None
+        project_exists = client.get_project_id(request.project_name) is not None
+        if process_exists and not request.known_process_exists:
+            unlisted.append(("process", request.known_process_exists))
+        if project_exists and not request.known_project_exists:
+            unlisted.append(("project", request.known_project_exists))
     plan = build_dry_run_plan(
         ir,
         update_policy=request.update_policy,
         confirm_process_update=request.confirm_process_update,
         confirm_project_update=request.confirm_project_update,
-        known_process_exists=request.known_process_exists,
-        known_project_exists=request.known_project_exists,
+        known_process_exists=process_exists,
+        known_project_exists=project_exists,
         step_filter=step_filter,
     )
+    if not plan.ok and unlisted:
+        plural = {"process": "processes", "project": "projects"}
+        reasons = [
+            f"Azure DevOps already has this {target}, but "
+            + (
+                f"the browser hadn't loaded its list of existing {plural[target]}."
+                if known is None
+                else f"it wasn't in the browser's list of existing {plural[target]} (the list was out of date)."
+            )
+            for target, known in unlisted
+        ]
+        buttons = " / ".join(f"Fetch existing {plural[target]}" for target, _known in unlisted)
+        plan.errors.append(
+            " ".join(reasons)
+            + f" Click {buttons} in the Connection section so the confirm "
+            + ("box appears" if len(unlisted) == 1 else "boxes appear")
+            + ", or change the existing target policy."
+        )
     if not plan.ok:
         return ApplyResult(
             ok=False,
@@ -113,12 +153,9 @@ def run_apply(
             timings=[],
         )
 
-    org_url = normalize_ado_org_url(request.org_url)
     output_dir = default_output_dir(org_url, request.project_name, request.output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dry-run apply never calls Azure DevOps; client is only created for live apply.
-    client = None if dry_run else AdoClient(org_url, pat)
     step_results: dict[str, Any] = {}
     process_id: str | None = None
 
@@ -242,12 +279,15 @@ def run_apply(
                     output_dir=output_dir,
                     limit=catalog_limit,
                     convert_markdown_to_html=bool(request.convert_markdown_to_html),
+                    include_deprecated_deleted=bool(request.include_deprecated_deleted),
                     parallel_workers=int(
                         getattr(request, "catalog_parallel_workers", 4) or 4
                     ),
                     progress=catalog_progress,
                     should_cancel=cancel_requested,
                     run_id=run_id,
+                    area_root=request.root_area_path or request.project_name,
+                    change_reader=change_reader,
                 )
             elif step_id == "report":
                 result = apply_report(
