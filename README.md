@@ -24,8 +24,8 @@ Because BPCTool is release-independent, it can be used with the latest Microsoft
 
 ## Requirements
 
-- **Node.js 20+** and **Python 3.11+** on the machine that runs BPCTool.
-- An Azure DevOps organization and a **PAT** with rights to manage processes, projects, and work items.
+- **Node.js 20.19+ or 22.12+** (Vite 8) and **Python 3.11+** on the machine that runs BPCTool.
+- An Azure DevOps organization and a **PAT**. Full setup needs Work Items *Read, write, & manage*, Project and Team *Read, write, & manage* and Extensions *Read*; a catalog-only import or a rehearsal needs less — see [PAT scopes](./bpctool/USER_GUIDE.md#pat-scopes).
 - The [Multivalue control (Microsoft DevLabs)](https://marketplace.visualstudio.com/items?itemName=ms-devlabs.vsts-extensions-multivalue-control) extension on the org — required for Multi-select fields and for the process / layout / project steps. The Connection panel checks for it and can install it when the PAT allows; otherwise an org admin installs it.
 - The current release's **ADO template guideline** `.xlsx` and catalog workbooks. They are **not** bundled.
 
@@ -52,7 +52,7 @@ npm start       # UI + auto-started runner (opens the browser)
 
 ## Using BPCTool
 
-1. **Connection** — enter the org URL (`https://dev.azure.com/{org}`, `{org}.visualstudio.com`, or just the org name) and PAT (kept for the browser session only). Existing projects and processes load automatically. Confirm **Multivalue: installed**, or use **Check** / **Install**.
+1. **Connection** — enter the org URL (`https://dev.azure.com/{org}`, `{org}.visualstudio.com`, or just the org name) and PAT (kept in the browser tab's session storage, cleared when the tab closes). Existing projects and processes load automatically. Confirm **Multivalue: installed**, or use **Check** / **Install**.
 2. **Execution mode** — **Runner** (default).
 3. **Process & project names** — enter names, an optional project description, and the update policy.
 4. **Workflow selection** — pick a run mode and a step card (see [Modes](#modes)).
@@ -77,17 +77,17 @@ Step-by-step detail, every option, and troubleshooting: [USER_GUIDE](./bpctool/U
 
 Sample UI in Runner mode (dark theme). Paths and names are illustrative.
 
-**Connection** — org URL, PAT, Multivalue check
+**Connection** — org URL, PAT (kept for this browser tab only), Multivalue check
 
-![Connection panel with org URL, PAT and the Multivalue extension check](./bpctool/docs/images/ui-connection.png)
+![Connection panel with org URL, PAT kept for this tab only, the Multivalue extension check and the note on PAT storage and scopes](./bpctool/docs/images/ui-connection.png)
 
 **Workflow selection** — four run modes and seven step cards. Here **Run from selected step onward** starts at Process Template, and every card in the run is marked.
 
 ![Run mode options and seven workflow cards marked Starts here and In this run](./bpctool/docs/images/ui-workflow.png)
 
-**Run configuration** — template workbook, catalog release folder, and the run output folder (the `<org>_<project>` subfolder is shown under it)
+**Run configuration** — template workbook, catalog release folder, and the run output folder (the `<org>_<project>` subfolder is shown under it, with the `-<code>` name used when another project's results already have that name)
 
-![Template, catalog folder and run output folder pickers, workbook version and catalog workers](./bpctool/docs/images/ui-run-config.png)
+![Template, catalog folder and run output folder pickers with the results subfolder hint, workbook version and catalog workers](./bpctool/docs/images/ui-run-config.png)
 
 **Live run** — the button reads **Run selected flow (live)** and a red note names what will change
 
@@ -166,7 +166,10 @@ Each run ends with a **results card** in the UI: a headline, a highlighted line 
 | `import-preview.csv`         | Sample of the catalog rows as they will be sent                                                                                      |
 | `import-changes.csv`         | Rehearsal against an existing project: every difference between the workbook and the work items already there, and rows a live run would duplicate |
 | `skipped-deprecated-deleted.csv` | Catalog rows not imported because their Catalog status (or a parent row's) is Deprecated or Deleted |
+| `bpctool-target.json`        | The organization and project this folder belongs to. Another project whose name gives the same folder name gets its own `<org>_<project>-<8 characters>` folder |
 
+
+CSV reports show text starting with `=`, `+`, `-` or `@` with a leading `'` so Excel can't run it as a formula. Reports contain catalog content and work item IDs: keep them with the workbooks, don't post them publicly, and delete folders you no longer need (keep `ado-id-map.csv` while the project may be re-imported).
 
 JSON versions (`*-summary.json`, `import-failures.json`, `import-prevalidate.json`, `import-changes.json`) carry the same data and a shared run ID. Catalog import is create-only for fields; a re-run skips items already in `ado-id-map.csv`, and a rehearsal lists the existing items whose values differ. More: [USER_GUIDE §11 Outputs](./bpctool/USER_GUIDE.md#11-outputs-and-artifacts).
 
@@ -187,6 +190,7 @@ JSON versions (`*-summary.json`, `import-failures.json`, `import-prevalidate.jso
 
 | Doc                                                                                        | Purpose                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Quick reference](./bpctool/docs/QUICK_REFERENCE.md)                                       | One page: start, PAT scopes, run order, which button changes what, run modes, results files, common problems, developer commands                                |
 | [USER_GUIDE](./bpctool/USER_GUIDE.md)                                                      | Full usage: install, every screen and option, Excel sheets, outputs, local API, troubleshooting                                                                 |
 | [CHANGELOG](./bpctool/CHANGELOG.md)                                                        | Release history                                                                                                                                                 |
 | [Workflow & reference-script comparison](./bpctool/docs/workflow-and-script-comparison.md) | Engine steps, quarterly releases, X vs H field applicability, catalog parallel/resume/backfill, incremental re-runs, Microsoft reference scripts vs BPCTool     |
@@ -201,7 +205,7 @@ bpctool/
   src/                  React UI (Vite)
   runner/               FastAPI runner: Excel → IR → plan → apply
   scripts/              Launcher env + Vite local-runner plugin
-  docs/                 Comparison doc, screenshots
+  docs/                 Quick reference, comparison doc, screenshots
   Start BPCTool.*       One-click launchers
   bpctool.env.example   Optional folder settings (copy to bpctool.env)
   runner-out/           Default run outputs (gitignored)
@@ -213,9 +217,12 @@ npm start                            # UI + runner (relaunch to load code change
 npm run dev                          # same, runner with --reload (a code change restarts it mid-run)
 npm run runner                       # runner API only (127.0.0.1:8787)
 npm test                             # UI tests (vitest)
-cd runner && ../.venv/bin/pytest -q  # runner tests
+npm run runner:install-dev           # once: pytest into .venv
+npm run runner:test                  # runner tests
 npm run lint && npm run build
 ```
+
+These commands work the same in Terminal, PowerShell and Command Prompt: the `runner*` scripts use `.venv/bin` on macOS / Linux and `.venv\Scripts` on Windows.
 
 The runner listens on `127.0.0.1:8787` and the UI proxies it as `/api/*`: `GET /health`, `GET /defaults`, `POST /plan/dry-run`, `POST /ir/parse`, `POST /jobs`, `GET /jobs/{id}?since=N`, `POST /jobs/{id}/cancel`, `GET /outputs/{folder}/{file}`. It accepts only `Host: 127.0.0.1` / `localhost` and sends no CORS headers. Request fields and curl examples: [USER_GUIDE §12](./bpctool/USER_GUIDE.md#12-local-runner-api).
 

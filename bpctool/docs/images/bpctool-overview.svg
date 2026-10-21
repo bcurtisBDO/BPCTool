@@ -27,7 +27,7 @@
 
   <g transform="translate(60,196)">
     <circle cx="14" cy="10" r="14" fill="#dbeafe"/><text x="7" y="15" font-size="14" font-weight="700" fill="#1d4ed8">&#10003;</text>
-    <text class="item" x="40" y="15">Node.js 20+ &#183; Python 3.11+</text>
+    <text class="item" x="40" y="15">Node.js 20.19+ &#183; Python 3.11+</text>
     <text class="detail" x="40" y="36">on the computer that runs BPCTool</text>
   </g>
   <g transform="translate(60,284)">

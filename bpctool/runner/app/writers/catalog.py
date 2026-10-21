@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +38,7 @@ from ..catalog_validate import (
     prevalidate_summary,
     write_prevalidate_csv,
 )
+from ..csv_safe import SafeDictWriter
 from ..failure_explain import enrich_failures, summarize_failures, write_failures_csv
 from ..mapping import TemplateMapping, build_mapping_from_ir
 from ..run_outcome import catalog_placeholder_count, project_name_notice
@@ -150,7 +150,7 @@ def apply_catalog(
 
     # Always write a preview sample showing normalized rich text.
     with preview_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
+        writer = SafeDictWriter(
             handle,
             fieldnames=[
                 "Key",

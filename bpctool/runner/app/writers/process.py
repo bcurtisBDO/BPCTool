@@ -35,9 +35,21 @@ def apply_process(
         "wits_skipped": 0,
         "picklists": 0,
         "fields_created": 0,
-        "fields_updated": 0,
+        "fields_existing": 0,
         "fields_skipped": 0,
+        "warnings": 0,
     }
+    # Items the workbook defines that Azure DevOps refused to create; the step fails on these.
+    errors: list[str] = []
+
+    def warn(message: str) -> None:
+        stats["warnings"] += 1
+        emit("process", f"WARNING: {message}")
+
+    def fail(message: str) -> None:
+        errors.append(message)
+        emit("process", f"FAILED: {message}")
+
     disabled_count = int(ir["counts"].get("disabled_work_item_types") or 0)
 
     if dry_run:
@@ -88,10 +100,9 @@ def apply_process(
                 )
                 if not process_ref:
                     stats["wits_skipped"] += 1
-                    emit(
-                        "process",
+                    warn(
                         f"WIT '{name}' is Disabled in Excel but could not be "
-                        "materialized for disable — set Disabled in ADO Process UI.",
+                        "materialized for disable — set Disabled in ADO Process UI."
                     )
                     continue
                 client.patch(
@@ -104,10 +115,9 @@ def apply_process(
                 emit("process", f"Disabled WIT '{name}' ({process_ref})")
             except AdoError as exc:
                 stats["wits_skipped"] += 1
-                emit(
-                    "process",
+                warn(
                     f"WIT '{name}' disable failed ({exc}). "
-                    "Disable it manually in Organization Settings → Process.",
+                    "Disable it manually in Organization Settings → Process."
                 )
             continue
 
@@ -136,11 +146,11 @@ def apply_process(
         if inherit_from:
             payload["inheritsFrom"] = inherit_from
 
-        try:
-            customization = str((existing_wit or {}).get("customization") or "").strip().lower()
-            # System entries in the process list are not process-local yet — create/inherit.
-            if existing_wit and customization not in {"", "system"}:
-                full_ref = existing_wit.get("referenceName") or ref_name
+        customization = str((existing_wit or {}).get("customization") or "").strip().lower()
+        # System entries in the process list are not process-local yet — create/inherit.
+        if existing_wit and customization not in {"", "system"}:
+            full_ref = existing_wit.get("referenceName") or ref_name
+            try:
                 client.patch(
                     f"/_apis/work/processes/{process_id}/workItemTypes/{quote(str(full_ref), safe='')}",
                     json_body={
@@ -151,7 +161,10 @@ def apply_process(
                     api_version="7.1-preview.2",
                 )
                 stats["wits_updated"] += 1
-            else:
+            except AdoError as exc:
+                warn(f"WIT '{name}' exists but its description / color / icon couldn't be updated: {exc}")
+        else:
+            try:
                 created = client.post(
                     f"/_apis/work/processes/{process_id}/workItemTypes",
                     json_body=payload,
@@ -160,11 +173,11 @@ def apply_process(
                 if created:
                     _index_one_wit(existing, created)
                 stats["wits_created"] += 1
-        except AdoError as exc:
-            if exc.status == 409:
-                stats["wits_skipped"] += 1
-            else:
-                emit("process", f"WIT '{name}' warning: {exc}")
+            except AdoError as exc:
+                if _already_exists(exc):
+                    stats["wits_skipped"] += 1
+                else:
+                    fail(f"WIT '{name}' could not be created: {exc}")
 
     # Refresh after creates so later steps see process-local refs (Process.Bug, etc.)
     existing = _index_process_wits(client.list_process_wits(process_id))
@@ -183,6 +196,7 @@ def apply_process(
     # Picklists
     lists_data = client.get("/_apis/work/processes/lists", api_version="7.1") or {}
     existing_lists = {item.get("name"): item for item in lists_data.get("value") or []}
+    failed_picklists: set[str] = set()
     for label, values in ir["process"]["picklists"].items():
         payload = {
             "name": label,
@@ -192,19 +206,25 @@ def apply_process(
             # (semicolon composites for multi-select / DevLabs).
             "isSuggested": label in multiselect_labels,
         }
-        try:
-            if label in existing_lists:
-                picklist_id = existing_lists[label]["id"]
+        if label in existing_lists:
+            picklist_id = existing_lists[label]["id"]
+            try:
                 client.put(
                     f"/_apis/work/processes/lists/{picklist_id}",
                     json_body=payload,
                     api_version="7.1",
                 )
-            else:
+                stats["picklists"] += 1
+            except AdoError as exc:
+                warn(f"Picklist '{label}' exists but couldn't be updated: {exc}")
+        else:
+            try:
                 client.post("/_apis/work/processes/lists", json_body=payload, api_version="7.1")
-            stats["picklists"] += 1
-        except AdoError as exc:
-            emit("process", f"Picklist '{label}' warning: {exc}")
+                stats["picklists"] += 1
+            except AdoError as exc:
+                if not _already_exists(exc):
+                    failed_picklists.add(label)
+                    fail(f"Picklist '{label}' could not be created: {exc}")
 
     # Refresh picklist ids for field create
     lists_data = client.get("/_apis/work/processes/lists", api_version="7.1") or {}
@@ -228,11 +248,17 @@ def apply_process(
         description = field.get("description") or ""
         is_multi = bool(field.get("multi_select"))
 
+        if reference.lower() in existing_fields:
+            # Organization fields can't be changed after creation (the Fields update API only
+            # locks / restores them), so an existing field is used as is; Layout binds it.
+            stats["fields_existing"] += 1
+            continue
+
         if field_type in {"PicklistString", "PicklistInteger"}:
             picklist_id = picklist_ids.get(label)
             if not picklist_id:
-                emit("process", f"Skipping field '{label}' — missing picklist")
-                stats["fields_skipped"] += 1
+                if label not in failed_picklists:
+                    fail(f"Field '{label}' ({reference}) not created — its picklist '{label}' wasn't found")
                 continue
             payload = {
                 "name": name,
@@ -252,28 +278,39 @@ def apply_process(
             }
 
         try:
-            if reference.lower() in existing_fields:
-                client.patch(
-                    f"/_apis/wit/fields/{quote(reference, safe='')}",
-                    json_body=payload,
-                    api_version="7.1",
-                )
-                stats["fields_updated"] += 1
-            else:
-                client.post("/_apis/wit/fields", json_body=payload, api_version="7.1")
-                stats["fields_created"] += 1
+            client.post("/_apis/wit/fields", json_body=payload, api_version="7.1")
+            stats["fields_created"] += 1
         except AdoError as exc:
-            emit("process", f"Field '{reference}' warning: {exc}")
+            if _already_exists(exc):
+                stats["fields_existing"] += 1
+            else:
+                fail(f"Field '{reference}' could not be created: {exc}")
 
     emit(
         "process",
         "Process apply finished: "
         f"WITs +{stats['wits_created']}/~{stats['wits_updated']}/"
         f"disabled {stats['wits_disabled']}, "
-        f"fields +{stats['fields_created']}/~{stats['fields_updated']}, "
-        f"HTML fields in template: {ir['counts'].get('html_fields', 0)}",
+        f"fields +{stats['fields_created']} ({stats['fields_existing']} already existed), "
+        f"HTML fields in template: {ir['counts'].get('html_fields', 0)}"
+        + (f", {stats['warnings']} warning(s)" if stats["warnings"] else ""),
     )
+    if errors:
+        shown = "; ".join(errors[:3]) + (f"; and {len(errors) - 3} more" if len(errors) > 3 else "")
+        raise ProcessSetupError(
+            f"Process step: {len(errors)} work item type(s) / picklist(s) / field(s) the workbook "
+            f"defines could not be created, so later steps would fail — {shown}. "
+            "Check the PAT's scopes and permissions (see the run log), then run Process again."
+        )
     return stats
+
+
+class ProcessSetupError(AdoError):
+    """Something the workbook defines couldn't be created; the Process step fails."""
+
+
+def _already_exists(exc: AdoError) -> bool:
+    return exc.status == 409 or "already exist" in str(exc).lower()
 
 
 def _ensure_process_local_wit(
