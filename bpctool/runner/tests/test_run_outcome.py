@@ -159,6 +159,22 @@ def test_project_name_substitution_is_shown_in_outcome_and_html(tmp_path) -> Non
     assert 'class="notice"' in html_text and "Your Project Name Here" in html_text
 
 
+def test_outcome_reports_states_set_after_create_and_ones_that_failed() -> None:
+    catalog = {
+        "drafts": 3, "created": 3, "skipped": 0, "failed": 0,
+        "state_set_after_create": 2, "state_not_set": 1,
+        "state_not_set_examples": [{"key": "k", "workItemId": 9, "state": "New", "sourceFile": "bpc.xlsx",
+                                    "sourceRow": 4, "error": "TF401320"}],
+    }
+    outcome = build_outcome({"catalog": catalog}, dry_run=False, output_dir=None)
+    step = outcome["steps"][0]
+    assert "2 items created in the type's first state, then moved to its State" in step["summary"]
+    item = outcome["attention"][0]
+    assert item["severity"] == "warning" and item["count"] == 1
+    assert item["title"].startswith("1 item created but not moved to its State")
+    assert item["examples"] == ["bpc.xlsx row 4 (k, work item 9) — State 'New': TF401320"]
+
+
 def test_ado_links_use_the_canonical_org_and_encode_names() -> None:
     from app.run_outcome import ado_links
 

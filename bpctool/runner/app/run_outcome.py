@@ -57,6 +57,11 @@ OUTPUT_FILES: dict[str, tuple[str, str]] = {
         "Imported items",
         "Catalog key → Azure DevOps work item ID. Used to resume; keep this file.",
     ),
+    "pending-state-updates.csv": (
+        "State updates",
+        "Items created in their type's first state and then moved to the workbook's State. Rows not "
+        "marked done are tried again by the next Catalog Import; keep this file.",
+    ),
     "import-preview.csv": ("Catalog sample", "First 50 catalog rows as they will be sent."),
     f"{LIVE_SUMMARY_NAME}.json": ("Run report (JSON)", "Machine-readable version of the report."),
     f"{REHEARSAL_SUMMARY_NAME}.json": ("Rehearsal report (JSON)", "Machine-readable version."),
@@ -199,6 +204,11 @@ def describe_step(step_id: str, result: dict[str, Any], *, dry_run: bool) -> tup
             text += (
                 f"; {_plural(result['matched_existing'], 'row')} with a new key matched an existing item by "
                 "Microsoft ID and reused it (matched-by-microsoft-id.csv)"
+            )
+        if result.get("state_set_after_create"):
+            text += (
+                f"; {_plural(result['state_set_after_create'], 'item')} created in the type's first "
+                "state, then moved to its State"
             )
         if failed:
             roots = summary.get("rootCauses", failed - int(result.get("missing_parent") or 0))
@@ -428,6 +438,29 @@ def build_outcome(
                 "examples": [],
                 "file": "import-failures.csv",
                 "count": int(catalog["outcome_unknown"]),
+            }
+        )
+    state_not_set = int(catalog.get("state_not_set") or 0)
+    if state_not_set:
+        attention.append(
+            {
+                "severity": "warning",
+                "title": f"{_plural(state_not_set, 'item')} created but not moved to {'its' if state_not_set == 1 else 'their'} State{catalog_note}",
+                "detail": (
+                    "Azure DevOps accepts only a type's first state when creating, so these items were created "
+                    "in it, but moving them to the workbook's State afterwards failed."
+                ),
+                "fix": (
+                    "Re-run Catalog Import: it tries these items again. If they still fail, check that the "
+                    "type allows that state, or set the State in Azure DevOps."
+                ),
+                "examples": [
+                    f"{ex.get('sourceFile')} row {ex.get('sourceRow')} ({ex.get('key')}, work item "
+                    f"{ex.get('workItemId')}) — State '{ex.get('state')}': {ex.get('error')}"
+                    for ex in (catalog.get("state_not_set_examples") or [])[:3]
+                ],
+                "file": "pending-state-updates.csv",
+                "count": state_not_set,
             }
         )
     prevalidate = catalog.get("prevalidate") or {}

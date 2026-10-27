@@ -256,6 +256,52 @@ def _wiql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+# The work item $batch endpoint is documented for this API version.
+BATCH_API_VERSION = "4.1"
+WORK_ITEM_BATCH_LIMIT = 200
+PARENT_LINK = "System.LinkTypes.Hierarchy-Reverse"
+
+
+def parent_id_from_relations(relations: Any) -> int | None:
+    """The Hierarchy-Reverse parent id in a work item's ``relations``, or None."""
+    for relation in relations or []:
+        if relation.get("rel") != PARENT_LINK:
+            continue
+        url = str(relation.get("url") or "").rstrip("/")
+        try:
+            return int(url.split("/")[-1])
+        except ValueError:
+            continue
+    return None
+
+
+def _batch_item_error(item: Any) -> str | None:
+    """None when one ``$batch`` result succeeded, else its error message."""
+    if not isinstance(item, dict):
+        return "Azure DevOps returned no result for this update"
+    try:
+        code = int(item.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if 200 <= code < 300:
+        return None
+    body: Any = item.get("body")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            pass
+    message: Any = body
+    if isinstance(body, dict):
+        value = body.get("value")
+        message = (
+            (value.get("Message") if isinstance(value, dict) else None)
+            or body.get("message")
+            or body
+        )
+    return f"ADO {code or 'error'}: {str(message)[:300]}"
+
+
 class AdoClient:
     def __init__(self, org_url: str, pat: str, *, api_version: str = "7.1") -> None:
         parsed = parse_ado_org_url(org_url)
@@ -816,6 +862,40 @@ class AdoClient:
                 return ids
             last = max(page)
 
+    def update_work_item_fields(self, project: str, work_item_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        patch = [{"op": "add", "path": f"/fields/{ref}", "value": value} for ref, value in fields.items()]
+        return self.request(
+            "PATCH",
+            f"/_apis/wit/workitems/{int(work_item_id)}",
+            project=project,
+            json_body=patch,
+            content_type="application/json-patch+json",
+            api_version="7.1",
+        ) or {}
+
+    def update_work_items_batch(self, updates: list[tuple[int, dict[str, Any]]]) -> list[str | None]:
+        """Field updates for up to ``WORK_ITEM_BATCH_LIMIT`` work items in one ``$batch`` request.
+
+        Returns one error message (None when it worked) per update, in order: each update
+        succeeds or fails on its own. Setting the same values twice is harmless, so the
+        request is retried like a read.
+        """
+        body = [
+            {
+                "method": "PATCH",
+                "uri": f"/_apis/wit/workitems/{int(work_item_id)}?api-version={BATCH_API_VERSION}",
+                "headers": {"Content-Type": "application/json-patch+json"},
+                "body": [{"op": "add", "path": f"/fields/{ref}", "value": value} for ref, value in fields.items()],
+            }
+            for work_item_id, fields in updates
+        ]
+        data = self.post("/_apis/wit/$batch", body, api_version=BATCH_API_VERSION) or {}
+        results = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(results, list) or len(results) != len(updates):
+            got = len(results) if isinstance(results, list) else "no"
+            raise AdoError(f"Unexpected $batch response: {got} result(s) for {len(updates)} update(s)")
+        return [_batch_item_error(item) for item in results]
+
     def get_parent_id(self, project: str, work_item_id: int) -> int | None:
         """Return Hierarchy-Reverse parent id, or None if unlinked."""
         data = (
@@ -827,16 +907,7 @@ class AdoClient:
             )
             or {}
         )
-        for relation in data.get("relations") or []:
-            if relation.get("rel") == "System.LinkTypes.Hierarchy-Reverse":
-                url = str(relation.get("url") or "").rstrip("/")
-                if not url:
-                    continue
-                try:
-                    return int(url.split("/")[-1])
-                except ValueError:
-                    continue
-        return None
+        return parent_id_from_relations(data.get("relations"))
 
     def add_parent_link(
         self,
@@ -853,7 +924,7 @@ class AdoClient:
                 "op": "add",
                 "path": "/relations/-",
                 "value": {
-                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "rel": PARENT_LINK,
                     "url": parent_url,
                     "attributes": {"comment": "Backfilled imported parent link"},
                 },
@@ -872,11 +943,22 @@ class AdoClient:
         )
 
     def get_work_items_batch(
-        self, project: str, ids: list[int], *, fields: list[str] | None = None
+        self,
+        project: str,
+        ids: list[int],
+        *,
+        fields: list[str] | None = None,
+        expand_relations: bool = False,
     ) -> list[dict[str, Any]]:
-        """Up to 200 work items (all fields unless ``fields``); deleted or inaccessible IDs are left out."""
+        """Up to 200 work items (all fields unless ``fields``); deleted or inaccessible IDs are left out.
+
+        Azure DevOps refuses ``fields`` together with an expand, so ``expand_relations``
+        returns every field as well.
+        """
         body: dict[str, Any] = {"ids": [int(i) for i in ids], "errorPolicy": "omit"}
-        if fields:
+        if expand_relations:
+            body["$expand"] = "relations"
+        elif fields:
             body["fields"] = list(fields)
         data = self.post(
             "/_apis/wit/workitemsbatch",

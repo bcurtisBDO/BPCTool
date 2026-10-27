@@ -435,3 +435,62 @@ def test_create_process_lists_processes_once(monkeypatch: pytest.MonkeyPatch) ->
     assert client.create_process("BPC") == "new-id"
     assert calls == [("GET", "/_apis/work/processes"), ("POST", "/_apis/work/processes")]
     assert client.create_process("scrum") == "scrum-id"
+
+
+def _capturing_client(monkeypatch: pytest.MonkeyPatch, responses: list) -> tuple[AdoClient, list]:
+    client = AdoClient("https://dev.azure.com/contoso", PAT)
+    sent: list[tuple[str, str, object]] = []
+
+    def fake_send(method, url, data, headers):
+        sent.append((method, url, json.loads(data) if data else None))
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        status, body = result
+        return status, "", None, json.dumps(body).encode()
+
+    monkeypatch.setattr(client, "_send", fake_send)
+    return client, sent
+
+
+def test_batch_update_sends_one_patch_per_item_and_reads_each_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    rejected = json.dumps({"value": {"Message": "TF401320: Rule Error for field State"}})
+    client, sent = _capturing_client(
+        monkeypatch,
+        [(200, {"count": 2, "value": [{"code": 200, "body": "{}"}, {"code": 400, "body": rejected}]})],
+    )
+    errors = client.update_work_items_batch([(7, {"System.State": "New"}), (8, {"System.State": "New"})])
+    assert errors[0] is None and "TF401320" in errors[1] and errors[1].startswith("ADO 400")
+    method, url, body = sent[0]
+    assert method == "POST" and url.startswith("https://dev.azure.com/contoso/_apis/wit/$batch?api-version=4.1")
+    assert body[0] == {
+        "method": "PATCH",
+        "uri": "/_apis/wit/workitems/7?api-version=4.1",
+        "headers": {"Content-Type": "application/json-patch+json"},
+        "body": [{"op": "add", "path": "/fields/System.State", "value": "New"}],
+    }
+
+
+def test_batch_update_is_retried_and_rejects_a_short_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, sent = _capturing_client(
+        monkeypatch, [ConnectionResetError("reset"), (200, {"count": 1, "value": [{"code": 200}]})]
+    )
+    with pytest.raises(AdoError, match="1 result"):
+        client.update_work_items_batch([(7, {"System.State": "New"}), (8, {"System.State": "New"})])
+    assert len(sent) == 2
+
+
+def test_batch_read_with_relations_asks_for_them_instead_of_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, sent = _capturing_client(monkeypatch, [(200, {"value": [{"id": 7, "relations": []}, None]})])
+    items = client.get_work_items_batch("Demo", [7, 8], fields=["System.Title"], expand_relations=True)
+    assert items == [{"id": 7, "relations": []}]
+    assert sent[0][2] == {"ids": [7, 8], "errorPolicy": "omit", "$expand": "relations"}
+
+
+def test_parent_id_from_relations() -> None:
+    relations = [
+        {"rel": "System.LinkTypes.Hierarchy-Forward", "url": "https://x/_apis/wit/workItems/5"},
+        {"rel": "System.LinkTypes.Hierarchy-Reverse", "url": "https://x/_apis/wit/workItems/42/"},
+    ]
+    assert ado_client.parent_id_from_relations(relations) == 42
+    assert ado_client.parent_id_from_relations(None) is None

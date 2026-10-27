@@ -433,6 +433,7 @@ def test_read_only_client_refuses_writes(monkeypatch) -> None:
         ("PATCH", "/_apis/wit/workitems/1"),
         ("DELETE", "/_apis/wit/workitems/1"),
         ("POST", "/_apis/wiql"),
+        ("POST", "/_apis/wit/$batch"),
     ]:
         with pytest.raises(AdoError, match="read-only"):
             client.request(method, path, project="Proj")

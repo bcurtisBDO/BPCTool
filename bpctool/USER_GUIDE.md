@@ -87,6 +87,7 @@ Microsoft ships a new template + catalog set each quarter. Keep each release in 
   _runner-out/                                optional BPCTOOL_OUTPUT_DIR (see below)
       <org>_<project>/
         ado-id-map.csv                        KEEP — what a Catalog re-run resumes from
+        pending-state-updates.csv             KEEP — States a re-run still has to set (if any)
         bpctool-target.json                   which org + project this folder belongs to
         descriptions-shortened.csv            only if Process shortened a description
         bpc-ado-setup-summary.html, import-failures.csv, …
@@ -308,7 +309,7 @@ If **Rehearsal only** is ticked, steps finish quickly with `[dry-run]` log lines
 
 Tick **Rehearsal only**, click **Rehearse selected flow**, and inspect the results card and preview files (`rehearsal-summary.html`, `import-prevalidate.csv`, `import-preview.csv`) without changing Azure DevOps. If the project already exists, the rehearsal also reads its catalog work items and reports what differs from the workbook (*Changes since the last import*, `import-changes.csv`; see §11). Untick it before the live run.
 
-**Cancel:** in Runner mode, **Cancel run** asks the runner to stop the job (`POST /jobs/{id}/cancel`); the button shows **Cancelling…** until it stops. The runner stops at the next safe point: between steps, at the next progress message inside Process/Layout/Project/Teams/Backlog, and in Catalog Import after in-flight creates finish (they are still written to `ado-id-map.csv`). Backfill is skipped; the job ends as **cancelled**. Steps that finished before the cancel are marked complete; Catalog is not, so run it again to resume. In Simulate/API modes, Cancel stops the client-side flow.
+**Cancel:** in Runner mode, **Cancel run** asks the runner to stop the job (`POST /jobs/{id}/cancel`); the button shows **Cancelling…** until it stops. The runner stops at the next safe point: between steps, at the next progress message inside Process/Layout/Project/Teams/Backlog, and in Catalog Import after in-flight creates finish (they are still written to `ado-id-map.csv`). State updates already queued for created items are still sent; any not confirmed stay in `pending-state-updates.csv` for the next run. Backfill is skipped; the job ends as **cancelled**. Steps that finished before the cancel are marked complete; Catalog is not, so run it again to resume. In Simulate/API modes, Cancel stops the client-side flow.
 
 **Page refresh:** if you reload the page while a Runner job is running, the UI reattaches to that job (same browser tab session) and replays its log. Restarting the runner process clears jobs, so there is nothing to reattach to.
 
@@ -433,13 +434,14 @@ Catalog Import is **one step for all catalog content** in the configured folder�
 | **Create-only fields** | Successful creates are not field-updated on re-run. Keys already in `ado-id-map.csv` are **skipped** (resume). Use a clean project to recreate. A **Rehearsal only** run lists what differs between the workbook and the existing items (`import-changes.csv`, §11) |
 | **Rows already in Azure DevOps** | Before creating, rows whose key isn't in `ado-id-map.csv` are looked up in the project by **Microsoft ID** (same work item type). This catches rows a new release renumbered (new Process sequence ID, same Microsoft ID), and every row when the ID map is missing. An item no other workbook row claims is **reused**: `ado-id-map.csv` records it under the row's new key, and its old key is dropped. When a release gave an existing key a new Microsoft ID and moved the old one to another row, the item follows its Microsoft ID and the key's row is created as a new item. A row that matches **several** items isn't created and is listed in `import-failures.csv` (*Already in Azure DevOps more than once*). Each match is listed in `matched-by-microsoft-id.csv`. If the lookup itself fails (network or Azure DevOps error), rows not in the ID map are **not** created that run — they'd risk duplicating renumbered rows — and are listed in `import-failures.csv`; re-run Catalog Import to create them. Existing items keep their values; backfill reports a parent that differs as `conflict_existing_parent` |
 | **Parallelism** | UI **Catalog workers** (1–16, default 4) → `catalog_parallel_workers`. Parent-aware: a child is queued as soon as its parent is created. Start with 2–8 to limit ATCPU/429. Each worker reuses a keep-alive HTTPS connection. When Azure DevOps signals its rate limit, all workers pause or slow down together (see [Throttling](#throttling-429--503-your-requests-are-being-delayed-email)) |
-| **Parent-link backfill** | After create, ensures Hierarchy-Reverse for pairs in the id map. Rows whose `ado-id-map.csv` `ParentId` already matches were linked in the create call and are reported `already_linked` without another request; the rest are checked in parallel with the same worker count. Writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
-| **Create retries** | Creates are retried only when ADO rejected them (429/503). If the connection drops after a create was sent, the runner looks the item up (type + title + `MSBPC.microsoftid`): one match is adopted into the id map, no match is retried once, several matches are reported as possible duplicates in `import-failures.csv` / `.json` |
+| **Parent-link backfill** | After create, ensures Hierarchy-Reverse for pairs in the id map. Rows whose `ado-id-map.csv` `ParentId` already matches (linked in the create call, or confirmed by an earlier backfill) are reported `already_linked` without another request. The rest are read 100 at a time, in parallel with the same worker count; links found or added are recorded in `ado-id-map.csv` so later runs skip them. Writes `backfill-links-report.csv` (`linked` / `already_linked` / `conflict_existing_parent` / `failed`) |
+| **Create retries** | Creates are retried only when ADO rejected them (429/503). If the connection drops after a create was sent, or Azure DevOps answers 500 / 502 / 504, the create may still have run: the runner looks the item up (type + title + `MSBPC.microsoftid`) four times over about 30 s, ignoring items the id map gives to other rows. One match is adopted into the id map; several matches are reported as possible duplicates in `import-failures.csv` / `.json`. With no match the create is **not sent again** (Azure DevOps may still be saving it): the row fails with *re-run Catalog Import*, and the re-run matches it by Microsoft ID or creates it |
 | **Log stats** | `created` / `skipped` / `linked` / `missing parent` / `failed` / `cancelled` / `reconciled` / worker count |
 | **Smoke tests** | API `catalog_limit` or a **Rehearsal only** run to avoid a full ~15k-row live import |
 
 **System.State:** Allowed values come from each work item type’s process state model in Azure DevOps (not the template Picklists sheet). The October 2026 catalog workbooks set State `New` on every row, including about 8,000 Test case rows. Azure DevOps' Test Case type has no `New` state (Design / Ready / Closed), so the **Process step adds a `New` state (Proposed category) to the process's Test Case**, as Microsoft's setup script does. Test cases then import as `New`.
 
+- Azure DevOps accepts only a type's first state (Test Case: Design) when an item is created. When it refuses a row's State, Catalog Import creates the item without it and then sets the State, as Microsoft's importer does; later rows of that type and State skip the refused attempt. States are set 200 items per request while creates continue, and each one is tracked in `pending-state-updates.csv` until Azure DevOps confirms it: if a run is cancelled or stops first, the next Catalog Import sets the rest. The run log and results card count these. An item whose State can't be set stays in the first state, is listed under **What needs attention**, and is tried again on the next Catalog Import.
 - If the state can't be added, the Process step logs a warning and those rows start in Design.
 - Live runs read each type's states from Azure DevOps after the Process step and strip any value it would reject (e.g. `Deprecated`). So do rehearsals when the project already exists; they also count `New` as valid when the run includes Process Template.
 - Preview plan and Rehearsal only, without a project to read, check only the Test Case rule. They flag Test Case `New` only when Process Template isn't part of the run.
@@ -508,13 +510,14 @@ Root: `<Run output folder>/<org>_<project>/` — the folder chosen in Run config
 | `skipped-deprecated-deleted.csv` | Catalog step, when Deprecated / Deleted rows were skipped — key, type, title, Catalog status, why skipped (own status or parent row), source file + row. Removed when nothing was skipped |
 | `import-changes.csv` | Rehearsal only, when the project exists — every difference between the workbook and the work items already in the project (see *Changes since the last import* below). Removed by a later rehearsal that can't compare, so it never shows stale results |
 | `import-changes.json` | Same comparison as counts: how rows were matched (`matchedBy`), items compared and changed, counts by kind, top fields with examples |
-| `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, …; **appended** across runs for resume. Rewritten when a row is matched to an existing item by Microsoft ID (the item's old key is replaced by the new one) |
+| `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, …; **appended** across runs for resume (the last row for a key wins; backfill appends a row with `ParentId` for each parent link it confirms). Rewritten when a row is matched to an existing item by Microsoft ID (the item's old key is replaced by the new one) |
+| `pending-state-updates.csv` | Live catalog import, when items were created in their type's first state and then moved to their State — one `pending` row per item before the update is sent, then `done` or `failed`. Items not `done` are tried again by the next Catalog Import; keep it with `ado-id-map.csv` |
 | `matched-by-microsoft-id.csv` | Live catalog import, when rows with a new key were found in the project by Microsoft ID — reused item (with its previous key), keys created as new items because their earlier item went to another row, and rows not created because several items match. Removed when nothing matched |
 | `backfill-links-report.csv` | Parent-link backfill statuses after catalog create |
 | `bpctool-target.json` | The organization and project this folder belongs to, written once a run has checked the folder (see *One results folder per project* in §2). Keep it with `ado-id-map.csv` |
 | `descriptions-shortened.csv` | Live Process step that shortened or dropped a field or work item type description (see [Long field descriptions](#long-field-or-work-item-type-descriptions)): kind, name, reference name, original and sent length, text sent, full workbook text. Kept as a record when a later run shortens nothing |
 
-CSV reports that people open in Excel (all of the above except `ado-id-map.csv`) put `'` in front of any value starting with `=`, `+`, `-`, `@`, tab or carriage return, so Excel shows it as text instead of running it as a formula.
+CSV reports that people open in Excel (all of the above except `ado-id-map.csv` and `pending-state-updates.csv`) put `'` in front of any value starting with `=`, `+`, `-`, `@`, tab or carriage return, so Excel shows it as text instead of running it as a formula.
 
 Every file written by a run carries the same run id (`runId`, the runner job id) and `generatedAt`, so you can tell whether the summary and the failures file came from the same run.
 
@@ -656,14 +659,16 @@ React UI (Vite)
                       ├─ planner.py          IR → plan (Preview plan)
                       ├─ richtext.py         HTML detect / optional MD→HTML
                       ├─ catalog_import.py   Drafts, Title 1..N parents, multiline flags
-                      ├─ catalog_runtime.py  Parallel create, id-map resume, parent backfill
+                      ├─ catalog_runtime.py  Parallel create, id-map resume, batched State
+                      │                      updates after create, batched parent backfill
                       ├─ catalog_validate.py Data checks (prevalidate) before create
                       ├─ catalog_changes.py  Rehearsal change report (workbook vs existing items)
                       ├─ failure_explain.py  Plain-language failure causes + fixes
                       ├─ run_outcome.py      Headline / attention / files for report + results card
                       ├─ paths.py            Release folders, output root
                       ├─ mapping.py          Catalog headers → field refs
-                      ├─ ado_client.py       REST client + retries + Multivalue / parent links;
+                      ├─ ado_client.py       REST client + retries + Multivalue / parent links,
+                      │                      batch reads + $batch updates;
                       │                      ReadOnlyAdoClient for rehearsals
                       ├─ org_url.py          Org URL normalize/parse
                       ├─ fs_browser.py       Path picker backend
@@ -703,7 +708,7 @@ npm run lint
 npm run build
 ```
 
-Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation (team names ignoring case, *Include sub areas*, one area-tree read), team iterations / backlogIteration GUID and parallel team settings, org URL normalize, layout (boolean fallback payloads after a 400, one fields + form read per type, multivalue control type), project description (failure → warning), the Process step failing when a work item type / picklist / field can't be created, results folders tied to one project (ownership file, separate folder for a name collision, ID map from another project rejected), spreadsheet-safe CSV reports, Title-outline catalog parents, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), step-name validation and the update policy for process / layout / backlog, concurrent-run lock, job cancel / PAT cleared / retention, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward), the existing-target gates, and the runner-unreachable message.
+Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation (team names ignoring case, *Include sub areas*, one area-tree read), team iterations / backlogIteration GUID and parallel team settings, org URL normalize, layout (boolean fallback payloads after a 400, one fields + form read per type, multivalue control type), project description (failure → warning), the Process step failing when a work item type / picklist / field can't be created, results folders tied to one project (ownership file, separate folder for a name collision, ID map from another project rejected), spreadsheet-safe CSV reports, Title-outline catalog parents, catalog creates with an unknown outcome (looked up, never re-sent), States set after create (batched, retried from `pending-state-updates.csv`), batched parent-link backfill that records confirmed links, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), step-name validation and the update policy for process / layout / backlog, concurrent-run lock, job cancel / PAT cleared / retention, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward), the existing-target gates, and the runner-unreachable message.
 
 ---
 
@@ -972,7 +977,7 @@ Completion is stored per org/process/project key in `localStorage`, and only liv
 - Catalog import is **create-only** for fields (no WIP upsert); **resume** skips keys in `ado-id-map.csv` and can backfill parent links. Updated spreadsheet rows do **not** refresh existing work item fields; a **Rehearsal only** run lists them (`import-changes.csv`)
 - The rehearsal change report matches rows without `ado-id-map.csv` by Microsoft ID only, for the work item types in the workbook
 - Catalog still uses one REST create per work item (parent-aware parallel, keep-alive connections); no WIT `$batch`
-- Backfill trusts `ParentId` recorded in `ado-id-map.csv`; a parent changed by hand in ADO after create is not re-checked for those rows (a rehearsal reports it as *Parent differs*)
+- Backfill trusts `ParentId` recorded in `ado-id-map.csv` (at create, or confirmed by an earlier backfill); a parent changed by hand in ADO after that is not re-checked for those rows (a rehearsal reports it as *Parent differs*)
 - Only Hierarchy-Reverse parent links are created (same as the reference scripts — no Related / Predecessor, etc.)
 - Job store is in-memory; restarting the runner clears job history (and anything to reattach to after a page refresh). It keeps the 20 most recent finished jobs; polling an older job id returns 404
 - Cancel is cooperative: a single long ADO request (e.g. one layout call) finishes before the job stops
@@ -1001,7 +1006,7 @@ In the browser:
   After run: check Run timing (per step + total) in the event log
   After any run: results card → Open report; Download failures / data checks
   Rehearsal against an existing project: Changes since the last import (import-changes.csv)
-  Keep ado-id-map.csv — a Catalog re-run resumes from it
+  Keep ado-id-map.csv (and pending-state-updates.csv) — a Catalog re-run resumes from them
 ```
 
 Developer equivalent: `npm run setup` once, then `npm start` each session.
@@ -1011,7 +1016,7 @@ Defaults:
 - Folders: `~/BPC Files/<YYYY-Qn>/` per release (template + catalog workbooks); override root with `BPCTOOL_CATALOG` in `bpctool.env`
 - Template: user-provided ADO guideline `.xlsx` in the release folder (not bundled; or `BPCTOOL_TEMPLATE`)
 - Catalog folder: newest release folder (BPC + Deliverables + Objectives + SbD)
-- Outputs: `<Run output folder>/<org>_<project>/` (default `BPCTOOL_OUTPUT_DIR`, else `runner-out/`) — keep `ado-id-map.csv`
+- Outputs: `<Run output folder>/<org>_<project>/` (default `BPCTOOL_OUTPUT_DIR`, else `runner-out/`) — keep `ado-id-map.csv` and `pending-state-updates.csv`
 - `Your Project Name Here` in area / iteration paths → the project name (reported in the results)
 - Root area path: project name
 - Markdown: preserved unless “Convert Markdown…to HTML” is checked

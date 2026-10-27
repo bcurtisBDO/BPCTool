@@ -377,6 +377,7 @@ def apply_catalog(
             parallel_workers=workers,
             progress=progress,
             should_cancel=should_cancel,
+            id_map_path=id_map_path,
         )
         stats["backfill"] = backfill_stats
         # Count backfill links toward linked when create missed the relation.
@@ -433,7 +434,7 @@ def _write_change_report(
         if id_map_rows:
             error = (
                 f"project '{project}' does not exist in Azure DevOps, but ado-id-map.csv lists "
-                f"{len(id_map_rows):,} items from an earlier import — the project was deleted or renamed"
+                f"{len(_id_map_from_rows(id_map_rows)):,} items from an earlier import — the project was deleted or renamed"
             )
             emit("catalog", f"Changes: {error}")
             return {"error": error}

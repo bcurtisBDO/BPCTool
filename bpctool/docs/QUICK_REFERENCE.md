@@ -76,6 +76,7 @@ Steps: **1** Process Template → **2** Page Layout Setup → **3** Project Crea
 | `import-prevalidate.csv` | Values changed or removed before import |
 | `import-changes.csv` | Rehearsal: what differs between the workbook and the existing project |
 | `ado-id-map.csv` | **Keep.** Lets a re-run skip items already created. Rows not in it are looked up by Microsoft ID before they're created |
+| `pending-state-updates.csv` | **Keep.** Items created in their type's first state (e.g. Test Case Design) and then moved to their State; any not marked `done` are set by the next Catalog Import |
 | `matched-by-microsoft-id.csv` | Rows with a new key (e.g. renumbered by a new release) that reused an existing item instead of creating another |
 | `bpctool-target.json` | Which org + project the folder belongs to |
 
