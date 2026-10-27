@@ -10,10 +10,21 @@ from urllib.parse import quote
 
 from ..ado_client import AdoClient, AdoError
 from ..catalog_changes import (
+    ambiguous_change,
     compare_with_azure_devops,
+    key_reassigned_change,
     match_by_microsoft_id,
+    matched_other_key_change,
     summarize_changes,
     write_changes_csv,
+)
+from ..catalog_match import (
+    MATCHED_CSV,
+    MICROSOFT_ID,
+    ExistingMatches,
+    apply_to_id_map,
+    find_existing_by_microsoft_id,
+    write_matched_csv,
 )
 from ..catalog_import import (
     SKIPPED_RETIRED_CSV,
@@ -39,7 +50,12 @@ from ..catalog_validate import (
     write_prevalidate_csv,
 )
 from ..csv_safe import SafeDictWriter
-from ..failure_explain import enrich_failures, summarize_failures, write_failures_csv
+from ..failure_explain import (
+    LOOKUP_FAILED_PREFIX,
+    enrich_failures,
+    summarize_failures,
+    write_failures_csv,
+)
 from ..mapping import TemplateMapping, build_mapping_from_ir
 from ..run_outcome import catalog_placeholder_count, project_name_notice
 
@@ -65,8 +81,12 @@ def apply_catalog(
     run_id: str = "",
     area_root: str = "",
     change_reader: AdoClient | None = None,
+    planned_states: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """``change_reader`` (rehearsal only) is used for reads, never writes."""
+    """``change_reader`` (rehearsal only) is used for reads, never writes.
+
+    ``planned_states`` (rehearsal only): states the Process step would add first.
+    """
     project = ir["targets"]["project_name"]
     catalog_dir = ir["source"].get("catalog_source_dir")
     workers = clamp_parallel_workers(parallel_workers)
@@ -203,6 +223,7 @@ def apply_catalog(
         extra_area_paths=extra_areas,
         allowed_states=allowed_states,
         area_root=area_root,
+        planned_states=planned_states if dry_run else None,
     )
     summary = prevalidate_summary(pre)
     stats["prevalidate"] = summary
@@ -228,23 +249,10 @@ def apply_catalog(
     else:
         emit("catalog", "Data checks: no issues found")
 
+    matched_path = output_dir / MATCHED_CSV
     if dry_run:
+        matched_path.unlink(missing_ok=True)
         existing = load_id_map(id_map_path)
-        remaining = sum(1 for d in drafts if d.key not in existing)
-        emit(
-            "catalog",
-            f"[dry-run] Preview written ({preview_path.name}); "
-            f"would import {remaining} of {len(drafts)} work items "
-            f"({len(existing)} already in id-map) with {workers} worker(s), "
-            + (
-                "markdown→HTML, "
-                if convert_markdown_to_html
-                else "preserving markdown (multilineFieldsFormat=Markdown), "
-            )
-            + "then parent-link backfill",
-        )
-        # Only workbook rows count; the map may list items no longer in the workbook.
-        stats["skipped"] = len(drafts) - remaining
         stats["id_map_path"] = str(preview_path)
         stats["changes"] = _write_change_report(
             change_reader,
@@ -260,9 +268,67 @@ def apply_catalog(
             project_lookup=project_lookup,
             retired=[item.draft for item in retired],
         )
+        would_create = stats["changes"].get("wouldCreate")
+        if would_create is None:
+            would_create = sum(1 for d in drafts if d.key not in existing)
+        emit(
+            "catalog",
+            f"[dry-run] Preview written ({preview_path.name}); "
+            f"would import {would_create} of {len(drafts)} work items "
+            f"({len(existing)} already in id-map) with {workers} worker(s), "
+            + (
+                "markdown→HTML, "
+                if convert_markdown_to_html
+                else "preserving markdown (multilineFieldsFormat=Markdown), "
+            )
+            + "then parent-link backfill",
+        )
+        # Only workbook rows count; the map may list items no longer in the workbook.
+        stats["skipped"] = len(drafts) - would_create
         return stats
 
     id_map = load_id_map(id_map_path)
+    matches = ExistingMatches()
+    hold: dict[str, str] = {}
+    try:
+        matches = find_existing_by_microsoft_id(
+            client,
+            drafts,
+            id_map,
+            project=project,
+            retired=[item.draft for item in retired],
+            complete_workbook=limit is None,
+            workers=workers,
+            emit=emit,
+        )
+    except AdoError as exc:
+        # Creating these anyway would duplicate rows an earlier import created under another key.
+        hold = {
+            draft.key: LOOKUP_FAILED_PREFIX + str(exc)
+            for draft in drafts
+            if draft.key not in id_map and str(draft.fields.get(MICROSOFT_ID) or "").strip()
+        }
+        emit(
+            "catalog",
+            f"WARNING: couldn't check Azure DevOps for rows already imported under another key "
+            f"(by Microsoft ID), so {len(hold)} new row(s) with a Microsoft ID were not created "
+            f"(and rows below them wait too). Re-run Catalog Import to create them: {exc}",
+        )
+    id_map = apply_to_id_map(matches, id_map, id_map_path)
+    write_matched_csv(matches, matched_path)
+    stats["matched_existing"] = len(matches.reused)
+    stats["keys_reassigned"] = len(matches.released)
+    stats["several_matches"] = len(matches.several)
+    if matches.reused or matches.several:
+        emit(
+            "catalog",
+            f"Reused {len(matches.reused)} existing work item(s) for rows with a new key"
+            + (f"; {len(matches.released)} key(s) given a new Microsoft ID are created as new items"
+               if matches.released else "")
+            + (f"; {len(matches.several)} row(s) not created because several items match"
+               if matches.several else "")
+            + f". List: {matched_path.name}",
+        )
     id_map, failures, create_stats = import_drafts_parent_aware(
         client,
         drafts,
@@ -273,6 +339,7 @@ def apply_catalog(
         emit=emit,
         progress=progress,
         should_cancel=should_cancel,
+        hold={**hold, **matches.held_keys},
     )
     stats.update(create_stats)
     drafts_by_key = {draft.key: draft for draft in drafts}
@@ -377,7 +444,28 @@ def _write_change_report(
     try:
         if id_map_rows:
             matched_by = "id_map"
-            rows, items, ambiguous = id_map_rows, None, None
+            items = None
+            matches = find_existing_by_microsoft_id(
+                reader,
+                drafts,
+                _id_map_from_rows(id_map_rows),
+                project=project,
+                retired=list(retired),
+                complete_workbook=complete_workbook,
+                workers=workers,
+                emit=emit,
+            )
+            # The map a live run would use after reusing these items.
+            reused_ids = {str(match.work_item_id) for match in matches.reused}
+            rows = [row for row in id_map_rows if str(row.get("WorkItemId") or "").strip() not in reused_ids]
+            rows += [
+                {"Key": m.draft.key, "WorkItemId": str(m.work_item_id),
+                 "WorkItemType": m.draft.work_item_type, "Title": m.draft.title}
+                for m in matches.reused
+            ]
+            ambiguous = [ambiguous_change(s.draft, s.work_item_ids) for s in matches.several]
+            ambiguous += [matched_other_key_change(m.draft, m.work_item_id, m.previous_keys) for m in matches.reused]
+            ambiguous += [key_reassigned_change(draft, wid) for draft, wid in matches.released]
         else:
             matched_by = "microsoft_id"
             emit("catalog", "Changes: no ado-id-map.csv in this output folder — matching rows to the project's work items by Microsoft ID")
@@ -406,21 +494,42 @@ def _write_change_report(
     matched_keys = {str(row.get("Key") or "").strip() for row in rows}
     compared = sum(1 for draft in drafts if draft.key in matched_keys)
     summary = summarize_changes(changes, compared=compared)
-    summary.update(matchedBy=matched_by, rows=len(drafts))
+    by_kind = summary["byKind"]
+    summary.update(
+        matchedBy=matched_by,
+        rows=len(drafts),
+        wouldCreate=by_kind["new_row"] + by_kind["key_reassigned"],
+    )
     if not complete_workbook:
         summary["partialWorkbook"] = True
     write_changes_csv(changes, csv_path)
     json_path.write_text(json.dumps({**_run_stamp(run_id), **summary}, indent=2), encoding="utf-8")
-    duplicates = summary["byKind"]["exists_not_in_id_map"]
+    reused = by_kind["exists_not_in_id_map"] + by_kind["matched_other_key"]
     emit(
         "catalog",
         f"Changes: {summary['itemsChanged']} of {compared} existing item(s) differ from the workbook "
         f"({summary['fieldsChanged']} field value(s)); "
-        f"{summary['byKind']['new_row']} new row(s)"
-        + (f"; {duplicates} row(s) a live run would create again (not in ado-id-map.csv)" if duplicates else "")
+        f"{summary['wouldCreate']} row(s) a live run would create"
+        + (f"; {reused} row(s) already in Azure DevOps under another key or not in ado-id-map.csv "
+           "(a live run reuses them)" if reused else "")
+        + (f"; {by_kind['ambiguous_match']} row(s) match several work items (not created)"
+           if by_kind["ambiguous_match"] else "")
+        + (f"; {by_kind['blocked_by_ambiguous_parent']} row(s) under them wait too (not created)"
+           if by_kind["blocked_by_ambiguous_parent"] else "")
         + f". Full list: {csv_path.name}",
     )
     return summary
+
+
+def _id_map_from_rows(rows: list[dict[str, str]]) -> dict[str, int]:
+    """Key → work item ID from rows already read from ado-id-map.csv (last row wins)."""
+    mapping: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("Key") or "").strip()
+        raw = str(row.get("WorkItemId") or "").strip()
+        if key and raw.isdigit():
+            mapping[key] = int(raw)
+    return mapping
 
 
 def _rehearsal_project_lookup(reader: AdoClient | None, project: str, emit: Emit) -> dict[str, Any]:

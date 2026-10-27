@@ -12,6 +12,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from ..ado_client import AdoClient, AdoError
+from .process import index_process_wits, resolve_process_wit, step_failure
 
 Emit = Callable[[str, str], None]
 
@@ -42,6 +43,8 @@ def apply_backlog(
         "team_iterations": 0,
         "warnings": 0,
     }
+    # Iterations Catalog Import needs; the step fails on these after configuring the rest.
+    failures: list[str] = []
     enabled_wit_backlogs = sum(
         1
         for wit in ir["process"].get("work_item_types") or []
@@ -77,17 +80,24 @@ def apply_backlog(
         if not process_id:
             raise AdoError(f'Process "{process_name}" not found for backlog apply.')
         backlog_refs = _configure_backlog_levels(client, ir, process_id, stats, emit)
-        _assign_wits_to_backlogs(client, ir, process_id, backlog_refs, stats, emit)
-        _set_default_wits(client, ir, process_id, backlog_refs, stats, emit)
+        wits = index_process_wits(client.list_process_wits(process_id))
+        wit_behaviors: dict[str, list[dict[str, Any]]] = {}
+        _assign_wits_to_backlogs(
+            client, ir, process_id, backlog_refs, stats, emit, wits=wits, wit_behaviors=wit_behaviors
+        )
+        _set_default_wits(
+            client, ir, process_id, backlog_refs, stats, emit, wits=wits, wit_behaviors=wit_behaviors
+        )
     else:
         emit(
             "backlog",
             f"Process '{process_name}' already exists and the policy is skip-existing: "
             "its backlog levels and work item type assignments were left as they are",
         )
-    _create_iteration_nodes(client, ir, project, stats, emit)
-
     tree = _fetch_iteration_tree(client, project, emit)
+    created = _create_iteration_nodes(client, ir, project, stats, emit, tree=tree, failures=failures)
+    if created or not tree:
+        tree = _fetch_iteration_tree(client, project, emit)
     if not tree:
         emit(
             "backlog",
@@ -130,6 +140,16 @@ def apply_backlog(
         f"{stats['team_settings']} team settings, "
         f"{stats['team_iterations']} team-iteration links",
     )
+    if failures:
+        raise step_failure(
+            "Backlog",
+            failures,
+            advice=(
+                "Catalog Import can't place items in iterations that don't exist. Check the PAT's "
+                "permissions and the iteration names on the Iteration paths sheet, then run Backlog again."
+            ),
+            stats=stats,
+        )
     return stats
 
 
@@ -502,28 +522,30 @@ def _configure_backlog_levels(
     return backlog_to_ref
 
 
-def _wit_name_index(client: AdoClient, process_id: str) -> dict[str, str]:
-    """Map WIT display name (and lowercase) → process referenceName."""
-    result: dict[str, str] = {}
-    for wit in client.list_process_wits(process_id):
-        name = str(wit.get("name") or "").strip()
-        ref = str(wit.get("referenceName") or "").strip()
-        if not name or not ref:
-            continue
-        result[name] = ref
-        result[name.lower()] = ref
-    return result
+def _wit_ref(wits: dict[str, Any], name: str, reference_name: str = "") -> str:
+    """Process referenceName for a workbook WIT (the process-local copy when there is one)."""
+    found = resolve_process_wit(wits, name, reference_name) or {}
+    return str(found.get("referenceName") or "").strip()
 
 
 def _list_wit_behaviors(
-    client: AdoClient, process_id: str, wit_ref: str
+    client: AdoClient,
+    process_id: str,
+    wit_ref: str,
+    cache: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Backlog levels a WIT is on; ``cache`` keeps one read per WIT (dropped after a change)."""
+    if cache is not None and wit_ref in cache:
+        return cache[wit_ref]
     data = client.get(
         f"/_apis/work/processes/{process_id}/workitemtypesbehaviors/"
         f"{quote(wit_ref, safe='')}/behaviors",
         api_version=WIT_BEHAVIOR_API,
     ) or {}
-    return list(data.get("value") or [])
+    found = list(data.get("value") or [])
+    if cache is not None:
+        cache[wit_ref] = found
+    return found
 
 
 def _assign_wits_to_backlogs(
@@ -533,10 +555,17 @@ def _assign_wits_to_backlogs(
     backlog_to_ref: dict[str, str],
     stats: dict[str, Any],
     emit: Emit,
+    *,
+    wits: dict[str, Any] | None = None,
+    wit_behaviors: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     """Assign each enabled WIT to its Backlog name behavior (reference Script 4 Part 2)."""
-    wit_refs = _wit_name_index(client, process_id)
-    emit("backlog", f"Assigning WITs to backlog levels ({len(wit_refs) // 2} types in process)")
+    if wits is None:
+        wits = index_process_wits(client.list_process_wits(process_id))
+    if wit_behaviors is None:
+        wit_behaviors = {}
+    type_count = len({id(wit) for wit in wits.values()})
+    emit("backlog", f"Assigning WITs to backlog levels ({type_count} types in process)")
 
     for wit in ir["process"].get("work_item_types") or []:
         wit_name = str(wit.get("name") or "").strip()
@@ -558,20 +587,21 @@ def _assign_wits_to_backlogs(
             stats["warnings"] += 1
             continue
 
-        wit_ref = wit_refs.get(wit_name) or wit_refs.get(wit_name.lower())
+        wit_ref = _wit_ref(wits, wit_name, str(wit.get("reference_name") or ""))
         if not wit_ref:
             emit("backlog", f"WARNING: WIT '{wit_name}' not found in process")
             stats["warnings"] += 1
             continue
 
         try:
-            current = _list_wit_behaviors(client, process_id, wit_ref)
+            current = _list_wit_behaviors(client, process_id, wit_ref, wit_behaviors)
             if any(
                 str((cb.get("behavior") or {}).get("id") or "") == behavior_ref
                 for cb in current
             ):
                 continue
 
+            wit_behaviors.pop(wit_ref, None)
             for cb in current:
                 old_ref = str((cb.get("behavior") or {}).get("id") or "").strip()
                 if not old_ref:
@@ -612,9 +642,15 @@ def _set_default_wits(
     backlog_to_ref: dict[str, str],
     stats: dict[str, Any],
     emit: Emit,
+    *,
+    wits: dict[str, Any] | None = None,
+    wit_behaviors: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     """Set Default work item type per Backlogs sheet row (reference set_default_wits)."""
-    wit_refs = _wit_name_index(client, process_id)
+    if wits is None:
+        wits = index_process_wits(client.list_process_wits(process_id))
+    if wit_behaviors is None:
+        wit_behaviors = {}
 
     for backlog in ir["process"].get("backlogs") or []:
         backlog_name = str(backlog.get("name") or "").strip()
@@ -623,9 +659,7 @@ def _set_default_wits(
         if not backlog_name or not default_wit_name or not behavior_ref:
             continue
 
-        default_wit_ref = wit_refs.get(default_wit_name) or wit_refs.get(
-            default_wit_name.lower()
-        )
+        default_wit_ref = _wit_ref(wits, default_wit_name)
         if not default_wit_ref:
             emit(
                 "backlog",
@@ -635,31 +669,30 @@ def _set_default_wits(
             stats["warnings"] += 1
             continue
 
+        behaviors_path = (
+            f"/_apis/work/processes/{process_id}/workitemtypesbehaviors/"
+            f"{quote(default_wit_ref, safe='')}/behaviors"
+        )
+        body = {"behavior": {"id": behavior_ref}, "isDefault": True}
         try:
-            current = _list_wit_behaviors(client, process_id, default_wit_ref)
-            if any(
-                str((cb.get("behavior") or {}).get("id") or "") == behavior_ref
-                and bool(cb.get("isDefault"))
-                for cb in current
-            ):
+            current = _list_wit_behaviors(client, process_id, default_wit_ref, wit_behaviors)
+            on_level = [
+                cb for cb in current if str((cb.get("behavior") or {}).get("id") or "") == behavior_ref
+            ]
+            if any(bool(cb.get("isDefault")) for cb in on_level):
                 continue
 
-            for cb in current:
-                if str((cb.get("behavior") or {}).get("id") or "") == behavior_ref:
-                    client.delete(
-                        f"/_apis/work/processes/{process_id}/workitemtypesbehaviors/"
-                        f"{quote(default_wit_ref, safe='')}/behaviors/"
-                        f"{quote(behavior_ref, safe='')}",
-                        api_version=WIT_BEHAVIOR_API,
-                    )
-                    break
-
-            client.post(
-                f"/_apis/work/processes/{process_id}/workitemtypesbehaviors/"
-                f"{quote(default_wit_ref, safe='')}/behaviors",
-                json_body={"behavior": {"id": behavior_ref}, "isDefault": True},
-                api_version=WIT_BEHAVIOR_API,
-            )
+            wit_behaviors.pop(default_wit_ref, None)
+            if not on_level:
+                client.post(behaviors_path, json_body=body, api_version=WIT_BEHAVIOR_API)
+            else:
+                try:
+                    client.patch(behaviors_path, json_body=body, api_version=WIT_BEHAVIOR_API)
+                except AdoError as exc:
+                    if exc.status not in {400, 404, 405}:
+                        raise
+                    # The update API was refused: remove and re-add (reference set_default_wits).
+                    _readd_as_default(client, behaviors_path, behavior_ref, body, emit, stats, default_wit_name)
             stats["default_wits"] += 1
             emit(
                 "backlog",
@@ -673,13 +706,52 @@ def _set_default_wits(
             stats["warnings"] += 1
 
 
+def _readd_as_default(
+    client: AdoClient,
+    behaviors_path: str,
+    behavior_ref: str,
+    body: dict[str, Any],
+    emit: Emit,
+    stats: dict[str, Any],
+    wit_name: str,
+) -> None:
+    client.delete(f"{behaviors_path}/{quote(behavior_ref, safe='')}", api_version=WIT_BEHAVIOR_API)
+    try:
+        client.post(behaviors_path, json_body=body, api_version=WIT_BEHAVIOR_API)
+    except AdoError:
+        try:
+            client.post(
+                behaviors_path,
+                json_body={"behavior": {"id": behavior_ref}, "isDefault": False},
+                api_version=WIT_BEHAVIOR_API,
+            )
+        except AdoError as restore_exc:
+            emit(
+                "backlog",
+                f"WARNING: '{wit_name}' was taken off backlog level {behavior_ref} and couldn't be put "
+                f"back ({restore_exc}); run Backlog again or add it in Process → Backlog levels",
+            )
+            stats["warnings"] += 1
+        raise
+
+
 def _create_iteration_nodes(
     client: AdoClient,
     ir: dict[str, Any],
     project: str,
     stats: dict[str, Any],
     emit: Emit,
-) -> None:
+    *,
+    tree: dict[str, Any] | None = None,
+    failures: list[str] | None = None,
+) -> bool:
+    """Create missing iteration nodes; True if any were created.
+
+    ``tree`` (from :func:`_fetch_iteration_tree`) avoids a GET per path segment.
+    """
+    existing = _iteration_paths(tree) if tree else None
+    failed: set[str] = set()
+    created = False
     for iteration in ir["project"]["iteration_paths"]:
         path = iteration["path"]
         parts = [p for p in path.split("\\") if p]
@@ -688,15 +760,45 @@ def _create_iteration_nodes(
         parent: list[str] = []
         for name in parts:
             current = parent + [name]
-            if not _iteration_exists(client, project, current):
+            key = "\\".join(current).lower()
+            if key in failed:
+                break
+            if existing is not None:
+                missing = key not in existing
+            else:
+                missing = not _iteration_exists(client, project, current)
+            if missing:
                 try:
                     _create_iteration(client, project, parent, name)
                     stats["iterations"] += 1
+                    created = True
                 except AdoError as exc:
                     if exc.status != 409:
-                        emit("backlog", f"Iteration {'/'.join(current)}: {exc}")
-                        stats["warnings"] += 1
+                        failed.add(key)
+                        message = f"iteration '{'/'.join(current)}' couldn't be created: {exc}"
+                        emit("backlog", f"FAILED: {message}")
+                        if failures is not None:
+                            failures.append(message)
+                        break
+                if existing is not None:
+                    existing.add(key)
             parent = current
+    return created
+
+
+def _iteration_paths(tree: dict[str, Any]) -> set[str]:
+    """Every iteration path under the project root (lowercase, relative)."""
+    paths: set[str] = set()
+    stack: list[tuple[dict[str, Any], str]] = [
+        (child, "") for child in tree.get("children") or [] if isinstance(child, dict)
+    ]
+    while stack:
+        node, parent = stack.pop()
+        name = str(node.get("name") or "")
+        path = f"{parent}\\{name}" if parent else name
+        paths.add(path.lower())
+        stack.extend((child, path) for child in node.get("children") or [] if isinstance(child, dict))
+    return paths
 
 
 def _fetch_iteration_tree(
@@ -705,23 +807,15 @@ def _fetch_iteration_tree(
     emit: Emit,
 ) -> dict[str, Any] | None:
     """Load the project iteration classification tree (needs $depth for children + GUIDs)."""
-    # Try literal $depth first (reference scripts), then percent-encoded — some stacks mangle `$`.
-    candidates = (
-        "/_apis/wit/classificationnodes/Iterations?$depth=10",
-        "/_apis/wit/classificationnodes/Iterations?%24depth=10",
-        "/_apis/wit/classificationNodes/Iterations?$depth=10",
-    )
-    last_error: AdoError | None = None
-    for path in candidates:
-        try:
-            tree = client.get(path, project=project, api_version="7.1")
-            if isinstance(tree, dict) and (tree.get("identifier") or tree.get("name")):
-                return tree
-        except AdoError as exc:
-            last_error = exc
-            continue
-    if last_error:
-        emit("backlog", f"Could not fetch iteration tree: {last_error}")
+    try:
+        tree = client.get(
+            "/_apis/wit/classificationnodes/Iterations?$depth=10", project=project, api_version="7.1"
+        )
+    except AdoError as exc:
+        emit("backlog", f"Could not fetch iteration tree: {exc}")
+        return None
+    if isinstance(tree, dict) and (tree.get("identifier") or tree.get("name")):
+        return tree
     return None
 
 
@@ -861,8 +955,16 @@ def _configure_one_team(
         stats["warnings"] += 1
         return stats
 
+    backlog_value = (team.get("backlog_iteration") or "@currentIteration").strip()
+    if backlog_value.lower() != "@currentiteration" and not _lookup_iteration(iteration_map, backlog_value):
+        emit(
+            "backlog",
+            f"WARNING: Team '{team_name}': Backlog iteration '{backlog_value}' isn't an iteration in "
+            "the project, so the project's root iteration is used. Check the Teams sheet.",
+        )
+        stats["warnings"] += 1
     payload = _team_settings_payload(team, settings or {}, root_id, iteration_map)
-    backlog_ok = _current_backlog_id(settings or {}) == root_id
+    backlog_ok = not _is_unset_iteration_id(_current_backlog_id(settings or {}))
     if payload:
         try:
             client.patch(
@@ -881,7 +983,6 @@ def _configure_one_team(
         except AdoError as exc:
             emit("backlog", f"FAILED team settings PATCH '{team_name}': {exc}")
             stats["warnings"] += 1
-            backlog_ok = False
     else:
         stats["team_settings"] += 1
 
@@ -917,6 +1018,11 @@ def _current_backlog_id(settings: dict[str, Any]) -> str:
     return str(backlog or "").strip()
 
 
+def _lookup_iteration(iteration_map: dict[str, str], path: str) -> str | None:
+    text = path.strip().strip("\\/")
+    return iteration_map.get(text) or iteration_map.get(text.replace("/", "\\"))
+
+
 def _is_unset_iteration_id(value: str) -> bool:
     return (not value) or value in {
         "00000000-0000-0000-0000-000000000000",
@@ -942,11 +1048,7 @@ def _team_settings_payload(
     backlog_iteration_value = (team.get("backlog_iteration") or "@currentIteration").strip()
     target_backlog_id = root_iteration_id
     if backlog_iteration_value.lower() != "@currentiteration":
-        target_backlog_id = (
-            iteration_map.get(backlog_iteration_value)
-            or iteration_map.get(backlog_iteration_value.replace("/", "\\"))
-            or root_iteration_id
-        )
+        target_backlog_id = _lookup_iteration(iteration_map, backlog_iteration_value) or root_iteration_id
 
     current_backlog = _current_backlog_id(current)
     if _is_unset_iteration_id(current_backlog) or current_backlog != target_backlog_id:

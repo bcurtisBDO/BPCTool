@@ -188,21 +188,39 @@ def test_cancel_keeps_failed_parent_descendants_as_missing_parent(tmp_path: Path
     assert stats["cancelled"] == 2
 
 
+def test_load_id_map_reads_excel_utf8_bom(tmp_path: Path) -> None:
+    path = tmp_path / "ado-id-map.csv"
+    path.write_bytes(
+        "Key,WorkItemId,WorkItemType,Title,ParentKey,ParentId\r\n"
+        "root,101,End to end,Root,,\r\n"
+        "child,102,Scenario,Child,root,101".encode("utf-8-sig")
+    )
+    assert load_id_map(path) == {"root": 101, "child": 102}
+    assert load_id_map_parents(path) == {"child": 101}
+
+    handle, writer = open_id_map_for_append(path)
+    append_id_map_row(writer, handle, _draft("leaf", parent_key="child"), 103, 102)
+    handle.close()
+    assert load_id_map(path) == {"root": 101, "child": 102, "leaf": 103}
+
+
 def test_create_outcome_unknown_adopts_single_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAY_S", 0)
+    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAYS_S", (0, 0, 0))
 
     class FakeClient:
         def __init__(self) -> None:
             self.creates = 0
+            self.lookups = 0
 
         def create_work_item(self, project, wit, fields, **kwargs):
             self.creates += 1
             raise AdoError("socket reset", transient=True, outcome_unknown=True)
 
         def find_work_item_ids(self, project, wit, **kwargs):
-            return [777]
+            self.lookups += 1
+            return [777] if self.lookups == 3 else []
 
     client = FakeClient()
     id_map_path = tmp_path / "ado-id-map.csv"
@@ -216,52 +234,61 @@ def test_create_outcome_unknown_adopts_single_match(
         emit=lambda *_: None,
     )
     assert client.creates == 1
+    assert client.lookups == 3
     assert failures == []
     assert id_map == {"only": 777}
     assert stats["reconciled"] == 1
+    # ParentId left blank so backfill re-checks the link instead of trusting it.
+    assert load_id_map_parents(tmp_path / "ado-id-map.csv") == {}
 
 
-def test_create_outcome_unknown_retries_once_when_absent(
+def test_create_outcome_unknown_is_not_sent_again_when_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAY_S", 0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAYS_S", (1.0, 2.0, 3.0))
+    monkeypatch.setattr(catalog_runtime.time, "sleep", sleeps.append)
 
     class FakeClient:
         def __init__(self) -> None:
             self.creates = 0
+            self.lookups = 0
 
         def create_work_item(self, project, wit, fields, **kwargs):
             self.creates += 1
-            if self.creates == 1:
-                raise AdoError("socket reset", transient=True, outcome_unknown=True)
-            return {"id": 55}
+            raise AdoError("socket reset", transient=True, outcome_unknown=True)
 
         def find_work_item_ids(self, project, wit, **kwargs):
+            self.lookups += 1
             return []
 
     client = FakeClient()
-    id_map_path = tmp_path / "ado-id-map.csv"
+    events: list[str] = []
     id_map, failures, stats = import_drafts_parent_aware(
         client,  # type: ignore[arg-type]
-        [_draft("only", parent_key="root", row=2)],
+        [_draft("only", parent_key="root", row=2), _draft("leaf", parent_key="only", row=3)],
         project="Demo",
         id_map={"root": 10},
-        id_map_path=id_map_path,
+        id_map_path=tmp_path / "ado-id-map.csv",
         parallel_workers=1,
-        emit=lambda *_: None,
+        emit=lambda _s, msg: events.append(msg),
     )
-    assert client.creates == 2
-    assert id_map == {"root": 10, "only": 55}
-    assert failures == []
-    assert stats["linked"] == 0
-    # ParentId left blank so backfill re-checks the link instead of trusting it.
-    assert load_id_map_parents(id_map_path) == {}
+    assert client.creates == 1
+    assert client.lookups == 3
+    assert sleeps == [1.0, 2.0, 3.0]
+    assert id_map == {"root": 10}
+    assert stats["outcome_unknown"] == 1
+    by_key = {f["key"]: f for f in failures}
+    assert "wasn't created again" in by_key["only"]["error"]
+    assert "Re-run Catalog Import" in by_key["only"]["error"]
+    assert by_key["leaf"]["error"] == "Parent not imported: only"
+    assert any("weren't sent again" in e for e in events)
 
 
 def test_create_outcome_unknown_with_duplicates_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAY_S", 0)
+    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAYS_S", (0,))
 
     class FakeClient:
         def create_work_item(self, project, wit, fields, **kwargs):
@@ -281,6 +308,120 @@ def test_create_outcome_unknown_with_duplicates_fails(
     )
     assert stats["outcome_unknown"] == 1
     assert "2 matching work items" in failures[0]["error"]
+
+
+def test_create_outcome_unknown_ignores_matches_mapped_to_other_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAYS_S", (0, 0))
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.lookups = 0
+
+        def create_work_item(self, project, wit, fields, **kwargs):
+            raise AdoError("ADO 500 Internal Server Error: boom", status=500, outcome_unknown=True)
+
+        def find_work_item_ids(self, project, wit, **kwargs):
+            self.lookups += 1
+            # 10 is the item imported earlier under "twin"; 55 shows up on the second look.
+            return [10] if self.lookups == 1 else [10, 55]
+
+    client = FakeClient()
+    id_map, failures, stats = import_drafts_parent_aware(
+        client,  # type: ignore[arg-type]
+        [_draft("only", row=2)],
+        project="Demo",
+        id_map={"twin": 10},
+        id_map_path=tmp_path / "ado-id-map.csv",
+        parallel_workers=1,
+        emit=lambda *_: None,
+    )
+    assert failures == []
+    assert id_map == {"twin": 10, "only": 55}
+    assert stats["reconciled"] == 1
+
+
+def test_create_outcome_unknown_with_only_claimed_matches_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_runtime, "RECONCILE_DELAYS_S", (0, 0))
+
+    class FakeClient:
+        def create_work_item(self, project, wit, fields, **kwargs):
+            raise AdoError("socket reset", transient=True, outcome_unknown=True)
+
+        def find_work_item_ids(self, project, wit, **kwargs):
+            return [10]
+
+    id_map, failures, stats = import_drafts_parent_aware(
+        FakeClient(),  # type: ignore[arg-type]
+        [_draft("only", row=2)],
+        project="Demo",
+        id_map={"twin": 10},
+        id_map_path=tmp_path / "ado-id-map.csv",
+        parallel_workers=1,
+        emit=lambda *_: None,
+    )
+    assert id_map == {"twin": 10}
+    assert stats["outcome_unknown"] == 1
+    assert "didn't show up" in failures[0]["error"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AdoError("Network error (outcome unknown, not retried)", transient=True, outcome_unknown=True),
+        AdoError("ADO 400 Bad Request: TF201036: already has a parent", status=400),
+    ],
+)
+def test_backfill_rechecks_parent_after_unclear_link_error(tmp_path: Path, error: AdoError) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.parent: int | None = None
+            self.links = 0
+
+        def get_parent_id(self, project, child_id):
+            return self.parent
+
+        def add_parent_link(self, project, child_id, parent_id, **kwargs):
+            self.links += 1
+            self.parent = parent_id
+            raise error
+
+    client = FakeClient()
+    counts = backfill_parent_links(
+        client,  # type: ignore[arg-type]
+        [_draft("root", row=1), _draft("a", parent_key="root", row=2)],
+        {"root": 1, "a": 2},
+        project="Demo",
+        output_dir=tmp_path,
+        emit=lambda *_: None,
+    )
+    assert client.links == 1
+    assert counts["linked"] == 1 and counts["failed"] == 0
+
+
+def test_backfill_reports_failure_when_recheck_finds_no_parent(tmp_path: Path) -> None:
+    class FakeClient:
+        def get_parent_id(self, project, child_id):
+            return None
+
+        def add_parent_link(self, project, child_id, parent_id, **kwargs):
+            raise AdoError("ADO 500 Internal Server Error (outcome unknown)", status=500, outcome_unknown=True)
+
+    counts = backfill_parent_links(
+        FakeClient(),  # type: ignore[arg-type]
+        [_draft("root", row=1), _draft("a", parent_key="root", row=2)],
+        {"root": 1, "a": 2},
+        project="Demo",
+        output_dir=tmp_path,
+        emit=lambda *_: None,
+    )
+    assert counts["failed"] == 1 and counts["linked"] == 0
+    with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert "outcome unknown" in rows[0]["Message"]
 
 
 def test_backfill_skips_links_recorded_at_create(tmp_path: Path) -> None:

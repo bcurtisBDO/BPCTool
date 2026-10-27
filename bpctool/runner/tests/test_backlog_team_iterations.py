@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import threading
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
+from app.ado_client import AdoError
 from app.writers.backlog import (
     _collect_iteration_ids,
     _index_iteration_tree,
     _team_settings_payload,
     apply_backlog,
 )
+from app.writers.process import StepSetupError
 
 
 class FakeClient:
@@ -291,3 +294,160 @@ def test_apply_backlog_assigns_iterations_to_each_team() -> None:
     # Root GUID must never be POSTed as a team iteration (TF400494).
     assert all(p["body"]["id"] != "root-guid" for p in iter_posts)
     assert any("backlogIteration=root-guid" in m for m in events)
+
+
+class SpecificBacklogClient(BacklogFakeClient):
+    """Team whose Backlog iteration is already a specific (non-root) iteration."""
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        if path == "/_apis/work/teamsettings":
+            return {
+                "bugsBehavior": "asRequirements",
+                "backlogIteration": {"id": "phase1-guid"},
+                "defaultIterationMacro": "",
+            }
+        return super().get(path, **kwargs)
+
+
+def _team_ir(backlog_iteration: str) -> dict[str, Any]:
+    ir = _backlog_ir(["Accounting"])
+    ir["project"]["teams"][0].update(backlog_iteration=backlog_iteration, include_sub_areas="No")
+    return ir
+
+
+def test_team_with_a_specific_backlog_iteration_still_gets_its_iterations() -> None:
+    client = SpecificBacklogClient()
+    events: list[str] = []
+    stats = apply_backlog(
+        client,
+        _team_ir("MSBPCProj\\Phase 1 - Initiate"),
+        dry_run=False,
+        emit=lambda _s, m: events.append(m),
+    )
+    assert not [p for p in client.patches if p["path"] == "/_apis/work/teamsettings"]
+    assert stats["team_iterations"] == 2 and stats["warnings"] == 0
+    assert not any("backlog iteration not set" in m for m in events)
+
+
+class FailingSettingsPatch:
+    def patch(self, path: str, **kwargs: Any) -> Any:
+        if path == "/_apis/work/teamsettings":
+            raise AdoError("ADO 400 Bad Request: nope", status=400)
+        return super().patch(path, **kwargs)  # type: ignore[misc]
+
+
+def test_failed_backlog_iteration_change_keeps_the_existing_one_and_adds_iterations() -> None:
+    class Client(FailingSettingsPatch, SpecificBacklogClient):
+        pass
+
+    client = Client()
+    events: list[str] = []
+    stats = apply_backlog(
+        client, _team_ir("@currentIteration"), dry_run=False, emit=lambda _s, m: events.append(m)
+    )
+    assert any("FAILED team settings PATCH 'Accounting'" in m for m in events)
+    assert not any("backlog iteration not set" in m for m in events)
+    assert sorted(client.team_iters["MSBPCProj/Accounting"]) == ["phase1-guid", "s1-guid"]
+    assert stats["team_iterations"] == 2
+
+
+def test_failed_patch_with_no_backlog_iteration_still_skips_iterations() -> None:
+    class Client(FailingSettingsPatch, BacklogFakeClient):
+        pass
+
+    client = Client()
+    events: list[str] = []
+    stats = apply_backlog(
+        client, _team_ir("@currentIteration"), dry_run=False, emit=lambda _s, m: events.append(m)
+    )
+    assert any("backlog iteration not set" in m for m in events)
+    assert "MSBPCProj/Accounting" not in client.team_iters
+    assert stats["team_iterations"] == 0
+
+
+def test_unknown_backlog_iteration_path_is_a_warning() -> None:
+    client = BacklogFakeClient()
+    events: list[str] = []
+    stats = apply_backlog(
+        client, _team_ir("MSBPCProj\\No such sprint"), dry_run=False, emit=lambda _s, m: events.append(m)
+    )
+    [patch] = [p for p in client.patches if p["path"] == "/_apis/work/teamsettings"]
+    assert patch["body"]["backlogIteration"] == "root-guid"
+    assert stats["warnings"] == 1
+    assert any("Backlog iteration 'MSBPCProj\\No such sprint' isn't an iteration" in m for m in events)
+
+
+class IterationTreeClient(BacklogFakeClient):
+    def __init__(self, *, reject: str = "") -> None:
+        super().__init__()
+        self.reject = reject
+        self.gets: list[str] = []
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        self.gets.append(path)
+        return super().get(path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        if "classificationnodes" in path.lower():
+            name = kwargs["json_body"]["name"]
+            if name == self.reject:
+                raise AdoError("ADO 403 Forbidden: no permission", status=403)
+            parent = self.tree
+            for part in path.split("/Iterations")[1].strip("/").split("/"):
+                if part:
+                    parent = next(c for c in parent["children"] if c["name"] == unquote(part))
+            parent["children"].append({"name": name, "identifier": f"{name}-guid", "children": []})
+        return super().post(path, **kwargs)
+
+
+def _iterations_ir(paths: list[str]) -> dict[str, Any]:
+    ir = _backlog_ir(["Accounting"])
+    ir["project"]["iteration_paths"] = [{"path": path} for path in paths]
+    return ir
+
+
+def test_iteration_tree_is_read_once_and_only_missing_nodes_are_created() -> None:
+    client = IterationTreeClient()
+    stats = apply_backlog(
+        client,
+        _iterations_ir(["Phase 1 - Initiate\\Sprint 1", "Phase 1 - Initiate\\Sprint 2", "Phase 2\\Sprint 3"]),
+        dry_run=False,
+        emit=lambda *_: None,
+    )
+    created = [(p["path"], p["body"]["name"]) for p in client.posts if "classificationnodes" in p["path"]]
+    assert created == [
+        ("/_apis/wit/classificationnodes/Iterations/Phase%201%20-%20Initiate", "Sprint 2"),
+        ("/_apis/wit/classificationnodes/Iterations", "Phase 2"),
+        ("/_apis/wit/classificationnodes/Iterations/Phase%202", "Sprint 3"),
+    ]
+    assert stats["iterations"] == 3
+    tree_reads = [g for g in client.gets if "classificationnodes" in g.lower()]
+    # Once to find missing nodes, once more for the new nodes' GUIDs; no per-node GETs.
+    assert tree_reads == ["/_apis/wit/classificationnodes/Iterations?$depth=10"] * 2
+    assert stats["team_iterations"] == 5
+
+
+def test_rerun_with_all_iterations_present_reads_the_tree_once() -> None:
+    client = IterationTreeClient()
+    apply_backlog(client, _iterations_ir(["Phase 1 - Initiate\\Sprint 1"]), dry_run=False, emit=lambda *_: None)
+    assert [g for g in client.gets if "classificationnodes" in g.lower()] == [
+        "/_apis/wit/classificationnodes/Iterations?$depth=10"
+    ]
+
+
+def test_iteration_that_cannot_be_created_fails_the_step_after_the_teams() -> None:
+    client = IterationTreeClient(reject="Phase 2")
+    events: list[str] = []
+    with pytest.raises(StepSetupError) as caught:
+        apply_backlog(
+            client,
+            _iterations_ir(["Phase 2\\Sprint 3", "Phase 2\\Sprint 4", "Phase 1 - Initiate\\Sprint 2"]),
+            dry_run=False,
+            emit=lambda _s, m: events.append(m),
+        )
+    message = str(caught.value)
+    assert "Backlog step: 1 change(s)" in message
+    assert "iteration 'Phase 2' couldn't be created" in message and "403" in message
+    # The rest of the step still ran: Sprint 2 created and the team configured.
+    assert any(p["body"]["name"] == "Sprint 2" for p in client.posts if "classificationnodes" in p["path"])
+    assert client.team_iters["MSBPCProj/Accounting"]

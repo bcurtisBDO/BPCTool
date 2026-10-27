@@ -38,7 +38,8 @@ ID_MAP_FIELDS = [
 # Field set on every draft (defaults to the row key) and used to find a work
 # item whose create outcome is unknown.
 RECONCILE_FIELD_REF = "MSBPC.microsoftid"
-RECONCILE_DELAY_S = 2.0
+# Waits before each lookup: a slow create can take a while to show up in WIQL.
+RECONCILE_DELAYS_S = (2.0, 5.0, 10.0, 15.0)
 PROGRESS_INTERVAL_S = 1.0
 TEXT_PROGRESS_EVERY = 500
 
@@ -69,7 +70,8 @@ def _never_cancel() -> bool:
 def read_id_map_rows(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         return []
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    # utf-8-sig: Excel's "CSV UTF-8" adds a BOM, which would otherwise end up in the Key header.
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
 
 
@@ -107,7 +109,15 @@ def open_id_map_for_append(path: Path) -> tuple[Any, csv.DictWriter]:
     """Open id-map CSV for append, writing header only when creating a new file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.is_file() or path.stat().st_size == 0
+    # A map saved by Excel may lack a final newline; the next row would join the last one.
+    needs_newline = False
+    if not write_header:
+        with path.open("rb") as existing:
+            existing.seek(-1, 2)
+            needs_newline = existing.read(1) not in (b"\n", b"\r")
     handle = path.open("a", encoding="utf-8", newline="")
+    if needs_newline:
+        handle.write("\r\n")
     writer = csv.DictWriter(handle, fieldnames=ID_MAP_FIELDS)
     if write_header:
         writer.writeheader()
@@ -249,9 +259,13 @@ def import_drafts_parent_aware(
     emit: Emit,
     progress: Progress | None = None,
     should_cancel: ShouldCancel | None = None,
+    hold: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], list[dict[str, Any]], dict[str, int]]:
     """
     Create drafts with resume + parent-aware parallelism.
+
+    ``hold``: keys not to create, each recorded as a failure with its reason; their
+    children are reported as blocked by parent.
 
     Returns (id_map, failures, stats) where stats has created/skipped/linked/failed/
     missing_parent (stuck without parent)/cancelled (not started before cancel)/
@@ -280,6 +294,11 @@ def import_drafts_parent_aware(
         )
 
     pending = {d.key: d for d in drafts if d.key not in id_map}
+    for key, reason in (hold or {}).items():
+        draft = pending.pop(key, None)
+        if draft is not None:
+            stats["failed"] += 1
+            failures.append(_failure(draft, reason))
     if not pending:
         emit("catalog", "Resume: nothing left to create")
         return id_map, failures, stats
@@ -289,11 +308,11 @@ def import_drafts_parent_aware(
         f"Creating {len(pending)} work item(s) with {workers} parent-aware worker(s)",
     )
 
-    counts = {"created": 0, "skipped": stats["skipped"], "failed": 0}
+    counts = {"created": 0, "skipped": stats["skipped"], "failed": stats["failed"]}
     tracker = _ProgressTracker(
         phase="create",
         total=len(drafts),
-        baseline=stats["skipped"],
+        baseline=stats["skipped"] + stats["failed"],
         counts=counts,
         emit=emit,
         progress=progress,
@@ -304,6 +323,12 @@ def import_drafts_parent_aware(
     queue = ReadyQueue(pending, id_map)
     handle, writer = open_id_map_for_append(id_map_path)
     lock = threading.Lock()
+    map_lock = threading.Lock()
+
+    def mapped_ids() -> set[int]:
+        with map_lock:
+            return set(id_map.values())
+
     in_flight: dict[Future, WorkItemDraft] = {}
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -312,7 +337,12 @@ def import_drafts_parent_aware(
                     for draft in queue.pop(workers - len(in_flight)):
                         parent_id = id_map.get(draft.parent_key) if draft.parent_key else None
                         future = executor.submit(
-                            _create_one, client, draft, project=project, parent_id=parent_id
+                            _create_one,
+                            client,
+                            draft,
+                            project=project,
+                            parent_id=parent_id,
+                            mapped_ids=mapped_ids,
                         )
                         in_flight[future] = draft
                 if not in_flight:
@@ -328,7 +358,8 @@ def import_drafts_parent_aware(
                             stats["outcome_unknown"] += 1
                         failures.append(_failure(draft, str(exc)))
                     else:
-                        id_map[draft.key] = work_item_id
+                        with map_lock:
+                            id_map[draft.key] = work_item_id
                         append_id_map_row(
                             writer, handle, draft, work_item_id, linked_parent_id, lock=lock
                         )
@@ -364,8 +395,9 @@ def import_drafts_parent_aware(
     if stats["outcome_unknown"]:
         emit(
             "catalog",
-            f"{stats['outcome_unknown']} create(s) had a network error with unknown outcome "
-            "and could not be reconciled — check import-failures.csv before re-running.",
+            f"{stats['outcome_unknown']} create(s) had a network error and couldn't be confirmed "
+            "afterwards, so they weren't sent again. Re-run Catalog Import to pick them up "
+            "(see import-failures.csv).",
         )
     return id_map, failures, stats
 
@@ -422,8 +454,13 @@ def _create_one(
     *,
     project: str,
     parent_id: int | None,
+    mapped_ids: Callable[[], set[int]] | None = None,
 ) -> tuple[int, int | None, bool]:
-    """Return (work item id, parent id linked in the create payload, reconciled)."""
+    """Return (work item id, parent id linked in the create payload, reconciled).
+
+    ``mapped_ids``: work item ids already in the id map (under other keys), read when
+    an unknown-outcome create is looked up.
+    """
     try:
         return _send_create(client, draft, project=project, parent_id=parent_id), parent_id, False
     except AdoError as exc:
@@ -432,10 +469,18 @@ def _create_one(
         original = exc
 
     # After an unknown-outcome create, record no ParentId so backfill verifies the link.
-    existing = _find_existing_after_unknown_create(client, draft, project=project, original=original)
+    existing = _find_existing_after_unknown_create(
+        client, draft, project=project, original=original, claimed=mapped_ids
+    )
     if existing is not None:
         return existing, None, True
-    return _send_create(client, draft, project=project, parent_id=parent_id), None, True
+    # Never re-sent: Azure DevOps may still be saving the first create.
+    raise AdoError(
+        f"{original}; the work item didn't show up in Azure DevOps, so it wasn't created again "
+        "(that could make a duplicate). Re-run Catalog Import: if the item was created, it is "
+        "matched by its Microsoft ID and kept; if not, it is created then.",
+        outcome_unknown=True,
+    )
 
 
 def _find_existing_after_unknown_create(
@@ -444,22 +489,32 @@ def _find_existing_after_unknown_create(
     *,
     project: str,
     original: AdoError,
+    claimed: Callable[[], set[int]] | None = None,
 ) -> int | None:
-    time.sleep(RECONCILE_DELAY_S)
-    try:
-        ids = client.find_work_item_ids(
-            project,
-            draft.work_item_type,
-            title=draft.title,
-            field_ref=RECONCILE_FIELD_REF,
-            field_value=draft.fields.get(RECONCILE_FIELD_REF),
-        )
-    except AdoError as lookup_exc:
-        raise AdoError(
-            f"{original}; duplicate check failed ({lookup_exc}). "
-            "Check Azure DevOps for this item before re-running.",
-            outcome_unknown=True,
-        ) from lookup_exc
+    """The item the lost create made, ignoring items the id map gives to other rows."""
+    ids: list[int] = []
+    for delay in RECONCILE_DELAYS_S:
+        time.sleep(delay)
+        try:
+            ids = client.find_work_item_ids(
+                project,
+                draft.work_item_type,
+                title=draft.title,
+                field_ref=RECONCILE_FIELD_REF,
+                field_value=draft.fields.get(RECONCILE_FIELD_REF),
+            )
+        except AdoError as lookup_exc:
+            raise AdoError(
+                f"{original}; couldn't check whether it was created ({lookup_exc}), so it "
+                "wasn't created again. Re-run Catalog Import: if the item was created, it is "
+                "matched by its Microsoft ID and kept; if not, it is created then.",
+                outcome_unknown=True,
+            ) from lookup_exc
+        if ids and claimed is not None:
+            taken = claimed()
+            ids = [i for i in ids if i not in taken]
+        if ids:
+            break
     if not ids:
         return None
     if len(ids) == 1:
@@ -484,7 +539,15 @@ def _check_parent_link(
                 "conflict_existing_parent",
                 f"Existing parent {current_parent_id}; expected {expected_parent_id}",
             )
-        client.add_parent_link(project, child_id, expected_parent_id)
+        try:
+            client.add_parent_link(project, child_id, expected_parent_id)
+        except AdoError as exc:
+            if not (exc.outcome_unknown or exc.status == 400):
+                raise
+            # The link may have been saved before the error (or by a lost earlier attempt).
+            if client.get_parent_id(project, child_id) == expected_parent_id:
+                return "linked", ""
+            raise
         return "linked", ""
     except (AdoError, KeyError, TypeError, ValueError) as exc:
         return "failed", str(exc)

@@ -18,19 +18,38 @@ class BehaviorFakeClient:
         self.wit_behaviors: dict[str, list[dict[str, Any]]] = {}
         self.puts: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
+        self.patches: list[dict[str, Any]] = []
         self.deletes: list[str] = []
+        self.gets: list[str] = []
+        self.wit_list_reads = 0
+        self.reject_update = False
 
     def list_process_wits(self, _process_id: str) -> list[dict[str, Any]]:
+        self.wit_list_reads += 1
         return list(self.wits)
 
     def get(self, path: str, **_kwargs: Any) -> Any:
+        self.gets.append(path)
         if path.endswith("/behaviors") and "workitemtypesbehaviors" not in path:
             return {"value": list(self.behaviors.values())}
         if "/workitemtypesbehaviors/" in path and path.endswith("/behaviors"):
             # .../workitemtypesbehaviors/{witRef}/behaviors
             wit_ref = path.split("/workitemtypesbehaviors/")[1].split("/behaviors")[0]
-            return {"value": list(self.wit_behaviors.get(wit_ref, []))}
+            return {"value": [dict(cb) for cb in self.wit_behaviors.get(wit_ref, [])]}
         return {"value": []}
+
+    def patch(self, path: str, **kwargs: Any) -> Any:
+        body = kwargs.get("json_body") or {}
+        self.patches.append({"path": path, "body": body})
+        if self.reject_update:
+            from app.ado_client import AdoError
+
+            raise AdoError("ADO 405 Method Not Allowed", status=405)
+        wit_ref = path.split("/workitemtypesbehaviors/")[1].split("/behaviors")[0]
+        for cb in self.wit_behaviors.get(wit_ref, []):
+            if cb["behavior"]["id"] == body["behavior"]["id"]:
+                cb["isDefault"] = bool(body.get("isDefault"))
+        return body
 
     def put(self, path: str, **kwargs: Any) -> Any:
         body = kwargs.get("json_body") or {}
@@ -331,3 +350,86 @@ def test_set_default_wits_marks_is_default() -> None:
     assert stats["default_wits"] == 1
     assert client.wit_behaviors["MSBPC.Process"][0]["isDefault"] is True
     assert any("Set 'Process' as default for 'Levels'" in m for m in events)
+
+
+LEVELS = "Microsoft.VSTS.Agile.EpicBacklogBehavior"
+
+
+def _default_ir(default_wit: str = "Process") -> dict[str, Any]:
+    return {"process": {"backlogs": [{"name": "Levels", "default_wit": default_wit, "rename_from": "Epic"}]}}
+
+
+def test_default_wit_is_updated_in_place_without_leaving_its_backlog_level() -> None:
+    client = BehaviorFakeClient(behaviors=[], wits=[{"name": "Process", "referenceName": "MSBPC.Process"}])
+    client.wit_behaviors["MSBPC.Process"] = [{"behavior": {"id": LEVELS}, "isDefault": False}]
+    stats: dict[str, Any] = {"default_wits": 0, "warnings": 0}
+    _set_default_wits(client, _default_ir(), "proc-1", {"Levels": LEVELS}, stats, lambda *_: None)
+
+    assert client.deletes == [] and client.posts == []
+    [patch] = client.patches
+    assert patch["path"].endswith("/workitemtypesbehaviors/MSBPC.Process/behaviors")
+    assert patch["body"] == {"behavior": {"id": LEVELS}, "isDefault": True}
+    assert client.wit_behaviors["MSBPC.Process"] == [{"behavior": {"id": LEVELS}, "isDefault": True}]
+    assert stats["default_wits"] == 1
+
+
+def test_default_wit_falls_back_to_remove_and_re_add_when_update_is_refused() -> None:
+    client = BehaviorFakeClient(behaviors=[], wits=[{"name": "Process", "referenceName": "MSBPC.Process"}])
+    client.wit_behaviors["MSBPC.Process"] = [{"behavior": {"id": LEVELS}, "isDefault": False}]
+    client.reject_update = True
+    stats: dict[str, Any] = {"default_wits": 0, "warnings": 0}
+    _set_default_wits(client, _default_ir(), "proc-1", {"Levels": LEVELS}, stats, lambda *_: None)
+
+    assert len(client.deletes) == 1
+    assert client.wit_behaviors["MSBPC.Process"] == [{"behavior": {"id": LEVELS}, "isDefault": True}]
+    assert stats["default_wits"] == 1 and stats["warnings"] == 0
+
+
+def test_backlog_wits_resolve_to_the_process_copy_when_the_system_entry_is_listed_last() -> None:
+    local = {
+        "name": "Bug",
+        "referenceName": "MSBPC.Bug",
+        "customization": "inherited",
+        "inherits": "Microsoft.VSTS.WorkItemTypes.Bug",
+    }
+    system = {"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug", "customization": "system"}
+    client = BehaviorFakeClient(behaviors=[], wits=[local, system])
+    stats: dict[str, Any] = {"wit_assignments": 0, "default_wits": 0, "warnings": 0}
+    ir = {
+        "process": {
+            "work_item_types": [
+                {"name": "Bug", "reference_name": "Microsoft.VSTS.WorkItemTypes.Bug", "backlog_name": "Levels"}
+            ],
+            "backlogs": [{"name": "Levels", "default_wit": "Bug"}],
+        }
+    }
+    _assign_wits_to_backlogs(client, ir, "proc-1", {"Levels": LEVELS}, stats, lambda *_: None)
+    _set_default_wits(client, ir, "proc-1", {"Levels": LEVELS}, stats, lambda *_: None)
+
+    assert [p["path"].split("/workitemtypesbehaviors/")[1] for p in client.posts] == ["MSBPC.Bug/behaviors"]
+    assert client.wit_behaviors["MSBPC.Bug"] == [{"behavior": {"id": LEVELS}, "isDefault": True}]
+    assert "Microsoft.VSTS.WorkItemTypes.Bug" not in client.wit_behaviors
+
+
+def test_apply_backlog_reads_the_wit_list_and_each_wit_behaviors_once() -> None:
+    from app.writers.backlog import apply_backlog
+
+    client = BehaviorFakeClient(
+        behaviors=[{"name": "Levels", "referenceName": LEVELS}],
+        wits=[{"name": "Process", "referenceName": "MSBPC.Process"}],
+    )
+    client.wit_behaviors["MSBPC.Process"] = [{"behavior": {"id": LEVELS}, "isDefault": True}]
+    ir = {
+        "targets": {"project_name": "Proj", "process_name": "Demo"},
+        "counts": {},
+        "process": {
+            "work_item_types": [{"name": "Process", "backlog_name": "Levels"}],
+            "backlogs": [{"name": "Levels", "default_wit": "Process"}],
+        },
+        "project": {"iteration_paths": [], "teams": []},
+    }
+    apply_backlog(client, ir, dry_run=False, emit=lambda *_: None, process_id="proc-1")
+
+    assert client.wit_list_reads == 1
+    assert sum("workitemtypesbehaviors/MSBPC.Process" in path for path in client.gets) == 1
+    assert client.posts == [] and client.patches == [] and client.deletes == []

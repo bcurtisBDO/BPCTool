@@ -7,6 +7,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from ..ado_client import AdoClient, AdoError
+from .process import step_failure
 
 Emit = Callable[[str, str], None]
 
@@ -51,6 +52,12 @@ def apply_teams(
     project_id = client.get_project_id(project)
     if not project_id:
         raise AdoError(f'Project "{project}" not found for teams apply.')
+    # Teams and area paths Catalog Import needs; the step fails on these after doing the rest.
+    failures: list[str] = []
+
+    def fail(message: str) -> None:
+        failures.append(message)
+        emit("teams", f"FAILED: {message}")
 
     # Teams from Teams sheet + any team names referenced on Area paths.
     team_names: list[str] = []
@@ -85,17 +92,15 @@ def apply_teams(
                 json_body={"name": name},
                 api_version="7.1",
             )
-            if created:
-                existing_teams[name.lower()] = created
+            existing_teams[name.lower()] = created or {"name": name}
             stats["teams"] += 1
         except AdoError as exc:
-            if exc.status == 409:
+            if exc.status == 409 or "already exist" in str(exc).lower():
+                existing_teams[name.lower()] = {"name": name}
                 stats["teams"] += 1
             else:
-                emit("teams", f"Team '{name}': {exc}")
-                stats["warnings"] += 1
+                fail(f"team '{name}' couldn't be created: {exc}")
 
-    allowed = set(existing_teams.keys()) | seen
     canonical_team = {name.lower(): name for name in team_names}
     include_sub_areas = {
         (team.get("name") or "").strip().lower()
@@ -107,8 +112,12 @@ def apply_teams(
 
     # A Root area path below the project (e.g. "Proj\Imported") holds the workbook's area tree.
     root_parts = _relative_area_parts(root, project)
+    failed_areas: set[str] = set()
+    area_failed_teams: set[str] = set()
     if root_parts:
-        _ensure_area_chain(client, project, root_parts, stats, emit, existing_areas)
+        _ensure_area_chain(
+            client, project, root_parts, stats, emit, existing_areas, failed=failed_areas, fail=fail
+        )
 
     # Create area nodes and collect per-team path sets (do not PATCH per row).
     team_assignments: dict[str, dict[str, Any]] = defaultdict(
@@ -120,14 +129,16 @@ def apply_teams(
         if not relative_parts:
             continue
         parts = root_parts + relative_parts
-        _ensure_area_chain(client, project, parts, stats, emit, existing_areas)
+        _ensure_area_chain(
+            client, project, parts, stats, emit, existing_areas, failed=failed_areas, fail=fail
+        )
 
         team_name = (area.get("team") or "").strip()
-        if not team_name:
+        if not team_name or team_name.lower() not in existing_teams:
+            # No team, or its creation failed above (already reported).
             continue
-        if team_name.lower() not in allowed:
-            emit("teams", f"Skipping area assignment for unknown team '{team_name}'")
-            stats["warnings"] += 1
+        if any("\\".join(parts[: depth + 1]).lower() in failed_areas for depth in range(len(parts))):
+            area_failed_teams.add(team_name.lower())
             continue
 
         relative = "\\".join(parts)
@@ -171,8 +182,10 @@ def apply_teams(
             )
             stats["warnings"] += 1
 
-    assigned = {name.lower() for name in team_assignments}
-    unassigned = [name for name in team_names if name.lower() not in assigned]
+    assigned = {name.lower() for name in team_assignments} | area_failed_teams
+    unassigned = [
+        name for name in team_names if name.lower() not in assigned and name.lower() in existing_teams
+    ]
     if unassigned:
         emit(
             "teams",
@@ -186,6 +199,16 @@ def apply_teams(
         f"Teams/areas finished: {stats['teams']} teams, {stats['areas']} areas, "
         f"{stats['assignments']} team area assignments",
     )
+    if failures:
+        raise step_failure(
+            "Teams",
+            failures,
+            advice=(
+                "Catalog Import can't place items in area paths that don't exist. Check the PAT's "
+                "permissions and the names on the Teams and Area paths sheets, then run Teams again."
+            ),
+            stats=stats,
+        )
     return stats
 
 
@@ -224,12 +247,20 @@ def _ensure_area_chain(
     stats: dict[str, Any],
     emit: Emit,
     existing: set[str] | None = None,
+    *,
+    failed: set[str],
+    fail: Callable[[str], None],
 ) -> None:
-    """Create each missing node of ``parts``; ``existing`` (from the tree) avoids a GET per node."""
+    """Create each missing node of ``parts``; ``existing`` (from the tree) avoids a GET per node.
+
+    A node that can't be created is reported once (``failed``); nodes below it are not tried.
+    """
     parent: list[str] = []
     for name in parts:
         current = parent + [name]
         key = "\\".join(current).lower()
+        if key in failed:
+            return
         if existing is not None:
             missing = key not in existing
         else:
@@ -240,8 +271,9 @@ def _ensure_area_chain(
                 stats["areas"] += 1
             except AdoError as exc:
                 if exc.status not in {409}:
-                    emit("teams", f"Area {'/'.join(current)}: {exc}")
-                    stats["warnings"] += 1
+                    failed.add(key)
+                    fail(f"area '{'/'.join(current)}' couldn't be created: {exc}")
+                    return
             if existing is not None:
                 existing.add(key)
         parent = current
