@@ -116,10 +116,10 @@ Before any step, a run with a PAT reads up to 20 of the work items listed in the
 
 | What it finds | What happens |
 |---------------|--------------|
-| No `ado-id-map.csv` yet, or the items are in this project | The folder is used and recorded as this project's |
+| No `ado-id-map.csv` yet, or all the items are in this project | The folder is used and recorded as this project's |
 | Folder from an older BPCTool version (no `bpctool-target.json`) whose items are in **another** project | The folder is recorded as that project's — it keeps its list — and this run uses its own `-<8 characters>` folder |
 | None of the items exist any more (for example the project was deleted and created again) | A run that includes Catalog Import stops before the first step: it would skip those rows instead of creating them. Move `ado-id-map.csv` out of the folder (keep a copy) or choose another Run output folder. Other runs only log a warning |
-| This project's folder lists another project's items (e.g. a copied file) | Same as above |
+| This project's folder lists another project's items (e.g. a copied file), or any folder's list mixes this project's items with another project's | Same as above; a mixed folder is never recorded as either project's |
 | Azure DevOps can't be read, or a rehearsal has no PAT | Nothing is decided; an older folder stays unclaimed until a run can check it |
 
 **Setting the folder variables:** copy `bpctool/bpctool.env.example` to `bpctool/bpctool.env` and uncomment `BPCTOOL_CATALOG`, `BPCTOOL_TEMPLATE`, or `BPCTOOL_OUTPUT_DIR`. The launcher reads it on start (double-click launchers included); real environment variables take precedence. Restart BPCTool after editing.
@@ -708,7 +708,7 @@ npm run lint
 npm run build
 ```
 
-Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation (team names ignoring case, *Include sub areas*, one area-tree read), team iterations / backlogIteration GUID and parallel team settings, org URL normalize, layout (boolean fallback payloads after a 400, one fields + form read per type, multivalue control type), project description (failure → warning), the Process step failing when a work item type / picklist / field can't be created, results folders tied to one project (ownership file, separate folder for a name collision, ID map from another project rejected), spreadsheet-safe CSV reports, Title-outline catalog parents, catalog creates with an unknown outcome (looked up, never re-sent), States set after create (batched, retried from `pending-state-updates.csv`), batched parent-link backfill that records confirmed links, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), step-name validation and the update policy for process / layout / backlog, concurrent-run lock, job cancel / PAT cleared / retention, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward), the existing-target gates, and the runner-unreachable message.
+Notable runner coverage includes Excel IR (disabled WITs, backlogs, project-name placeholder), backlog rename/heal + WIT assignment, team area aggregation (team names ignoring case, *Include sub areas*, one area-tree read), team iterations / backlogIteration GUID and parallel team settings, org URL normalize, layout (boolean fallback payloads after a 400, one fields + form read per type, multivalue control type), project description (failure → warning), the Process step failing when a work item type / picklist / field can't be created, results folders tied to one project (ownership file, separate folder for a name collision, ID map from another project — or mixing two projects — rejected), spreadsheet-safe CSV reports, Title-outline catalog parents, catalog creates with an unknown outcome (looked up, never re-sent), States set after create (batched, retried from `pending-state-updates.csv`), batched parent-link backfill that records confirmed links, catalog data checks (area / iteration / state / length / picklists, root area path), the rehearsal change report (ID map and Microsoft ID matching, value normalization, read-only client), step-name validation and the update policy for process / layout / backlog, concurrent-run lock, job cancel / PAT cleared / retention, existing-target checks, failure explanations, run outcome + report, output folders, an end-to-end rehearsal, and multi-select field labels. UI tests cover run-mode step resolution (including Run from selected step onward), the existing-target gates, and the runner-unreachable message.
 
 ---
 
@@ -775,11 +775,11 @@ Use the current quarter's **ADO template guideline** workbook, not a catalog fil
 
 ### Run stops: ado-id-map.csv lists another project or missing work items
 
-**Symptom:** a run that includes Catalog Import stops before the first step with *ado-id-map.csv in results folder '…' lists work items from project '…'* or *None of the … work items checked from ado-id-map.csv … exist in Azure DevOps any more*.
+**Symptom:** a run that includes Catalog Import stops before the first step with *ado-id-map.csv in results folder '…' lists work items from project '…'*, *… lists work items from several projects*, or *None of the … work items checked from ado-id-map.csv … exist in Azure DevOps any more*.
 
-**Why:** the results folder's imported-items list doesn't belong to this project — for example the project was deleted and created again with the same name, or the file was copied from another project's folder. Catalog Import would skip those rows instead of creating them.
+**Why:** the results folder's imported-items list doesn't belong to this project — for example the project was deleted and created again with the same name, or the file was copied from another project's folder, or an older version wrote two projects' items into one shared folder. Catalog Import would skip those rows instead of creating them.
 
-**Fix:** move `ado-id-map.csv` out of the results folder (keep a copy), or choose another **Run output folder**, then run again. See *One results folder per project* in §2.
+**Fix:** move `ado-id-map.csv` out of the results folder (keep a copy), or choose another **Run output folder**, then run again. For a mixed list you can instead keep only this project's rows in it. See *One results folder per project* in §2.
 
 ### Process step: … could not be created
 

@@ -81,7 +81,7 @@ Steps: **1** Process Template → **2** Page Layout Setup → **3** Project Crea
 | `bpctool-target.json` | Which org + project the folder belongs to |
 
 - Another project whose name gives the same folder name gets `<org>_<project>-<code>`.
-- Before any step, a run checks that `ado-id-map.csv` lists this project's work items. A run with Catalog Import stops if they belong to another project or no longer exist (project deleted and recreated) — move the file aside or pick another folder.
+- Before any step, a run checks that `ado-id-map.csv` lists this project's work items. A run with Catalog Import stops if any belong to another project or none exist any more (project deleted and recreated) — move the file aside or pick another folder.
 - Reports contain catalog content: don't post them publicly; delete folders you no longer need (but keep `ado-id-map.csv` while the project may be re-imported).
 
 ## Common problems
