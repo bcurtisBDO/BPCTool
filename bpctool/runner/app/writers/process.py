@@ -21,7 +21,8 @@ SHORTENED_FIELDS = ("kind", "name", "reference_name", "original_length", "sent_l
 
 
 # Test Case has no "New" state (Design / Ready / Closed). Microsoft's setup adds one so
-# catalog rows with State = New import as written.
+# catalog rows with State = New import as written. An added state goes first in its
+# category; a type's first Proposed state is the only one Azure DevOps accepts on create.
 TEST_CASE_REFERENCE = "Microsoft.VSTS.WorkItemTypes.TestCase"
 _ADDED_STATES: dict[str, tuple[dict[str, str], ...]] = {
     TEST_CASE_REFERENCE.lower(): ({"name": "New", "color": "b2b2b2", "stateCategory": "Proposed"},),
@@ -36,6 +37,26 @@ def states_added_by_process(ir: dict[str, Any]) -> dict[str, list[str]]:
         if states and not wit.get("disabled") and wit.get("name"):
             added[str(wit["name"])] = [state["name"] for state in states]
     return added
+
+
+def _first_state(states: list[dict[str, Any]], category: str, *, visible_only: bool) -> dict[str, Any] | None:
+    """The lowest-``order`` state of ``category``; None when Azure DevOps didn't return orders."""
+    ranked = [
+        state
+        for state in states
+        if str(state.get("stateCategory") or "").casefold() == category.casefold()
+        and isinstance(state.get("order"), int)
+        and not (visible_only and state.get("hidden"))
+    ]
+    return min(ranked, key=lambda state: state["order"], default=None)
+
+
+def _not_first(wit: str, state: str, first: Any, reason: str) -> str:
+    return (
+        f"State '{state}' added to '{wit}' but '{first}' is still its first state ({reason}). New "
+        f"'{wit}' items start in '{first}'; Catalog Import moves rows to '{state}' after create. To "
+        f"change it, move '{state}' up in the process's '{wit}' states."
+    )
 
 
 def shorten_description(text: str, limit: int = FIELD_DESCRIPTION_MAX) -> str:
@@ -73,6 +94,15 @@ def multiselect_field_labels(ir: dict[str, Any]) -> set[str]:
         str(field.get("label") or field.get("field_name") or "").strip()
         for field in ir.get("process", {}).get("fields") or []
         if field.get("multi_select") and (field.get("label") or field.get("field_name"))
+    }
+
+
+def integer_picklist_labels(ir: dict[str, Any]) -> set[str]:
+    """Casefolded labels of PicklistInteger fields; their picklists hold integers."""
+    return {
+        str(field.get("label") or field.get("field_name") or "").strip().casefold()
+        for field in ir.get("process", {}).get("fields") or []
+        if str(field.get("field_type") or "").strip().casefold() == "picklistinteger"
     }
 
 
@@ -324,21 +354,41 @@ def apply_process(
             continue
         path = f"/_apis/work/processes/{process_id}/workItemTypes/{quote(local_ref, safe='')}/states"
         try:
-            have = {
-                str(state.get("name") or "").casefold()
-                for state in (client.get(path, api_version="7.1") or {}).get("value") or []
-            }
+            current = (client.get(path, api_version="7.1") or {}).get("value") or []
+            have = {str(state.get("name") or "").casefold() for state in current}
             for state in wanted:
                 if state["name"].casefold() in have:
                     continue
+                body = dict(state)
+                ahead = _first_state(current, state["stateCategory"], visible_only=False)
+                if ahead is not None:
+                    body["order"] = ahead["order"]
                 try:
-                    client.post(path, json_body=dict(state), api_version="7.1")
+                    client.post(path, json_body=body, api_version="7.1")
                 except AdoError as exc:
-                    if not _already_exists(exc):
+                    if _already_exists(exc):
+                        continue
+                    if "order" not in body:
                         raise
+                    try:
+                        client.post(path, json_body=dict(state), api_version="7.1")
+                    except AdoError as again:
+                        if not _already_exists(again):
+                            raise
+                    stats["states_added"] += 1
+                    warn(_not_first(name, state["name"], ahead.get("name"), f"not placed first: {exc}"))
                     continue
                 stats["states_added"] += 1
                 emit("process", f"Added state '{state['name']}' ({state['stateCategory']}) to '{name}'")
+                if ahead is None:
+                    continue
+                try:
+                    after = (client.get(path, api_version="7.1") or {}).get("value") or []
+                except AdoError:
+                    continue
+                first = _first_state(after, state["stateCategory"], visible_only=True)
+                if first is not None and str(first.get("name") or "").casefold() != state["name"].casefold():
+                    warn(_not_first(name, state["name"], first.get("name"), "Azure DevOps kept it below"))
         except AdoError as exc:
             warn(f"State {names} couldn't be added to '{name}' ({exc}); {fallback}.")
 
@@ -353,22 +403,26 @@ def apply_process(
             + ", ".join(sorted(multiselect_labels)),
         )
 
-    # Picklists
+    # Picklists (Azure DevOps list names ignore case, so they're keyed casefolded)
     lists_data = client.get("/_apis/work/processes/lists", api_version="7.1") or {}
-    existing_lists = {item.get("name"): item for item in lists_data.get("value") or []}
-    picklist_ids = {name: item["id"] for name, item in existing_lists.items() if item.get("id")}
+    existing_lists = {
+        str(item.get("name") or "").casefold(): item for item in lists_data.get("value") or [] if item.get("name")
+    }
+    picklist_ids = {key: item["id"] for key, item in existing_lists.items() if item.get("id")}
     failed_picklists: set[str] = set()
+    integer_lists = integer_picklist_labels(ir)
     for label, values in ir["process"]["picklists"].items():
+        key = label.casefold()
         payload = {
             "name": label,
-            "type": "String",
+            "type": "Integer" if key in integer_lists else "String",
             "items": values,
             # Suggested lists accept stored values beyond a single picklist token
             # (semicolon composites for multi-select / DevLabs).
             "isSuggested": label in multiselect_labels,
         }
-        if label in existing_lists:
-            picklist_id = existing_lists[label]["id"]
+        if key in existing_lists:
+            picklist_id = existing_lists[key]["id"]
             try:
                 client.put(
                     f"/_apis/work/processes/lists/{picklist_id}",
@@ -389,17 +443,19 @@ def apply_process(
                 )
                 stats["picklists"] += 1
                 if created.get("id"):
-                    picklist_ids[label] = created["id"]
+                    picklist_ids[key] = created["id"]
             except AdoError as exc:
                 if exc.outcome_unknown:
                     # Looked up by name below; its fields fail if it wasn't created.
                     emit("process", f"Picklist '{label}': {exc}; checking whether Azure DevOps created it")
                 elif not _already_exists(exc):
-                    failed_picklists.add(label)
+                    failed_picklists.add(key)
                     fail(f"Picklist '{label}' could not be created: {exc}")
 
     missing = [
-        label for label in ir["process"]["picklists"] if label not in picklist_ids and label not in failed_picklists
+        label
+        for label in ir["process"]["picklists"]
+        if label.casefold() not in picklist_ids and label.casefold() not in failed_picklists
     ]
     if missing:
         picklist_ids.update(_find_picklist_ids(client, missing))
@@ -429,16 +485,17 @@ def apply_process(
             stats["fields_existing"] += 1
             continue
 
-        if field_type in {"PicklistString", "PicklistInteger"}:
-            picklist_id = picklist_ids.get(label)
+        picklist_type = field_type.casefold()
+        if picklist_type in {"pickliststring", "picklistinteger"}:
+            picklist_id = picklist_ids.get(str(label).casefold())
             if not picklist_id:
-                if label not in failed_picklists:
+                if str(label).casefold() not in failed_picklists:
                     fail(f"Field '{label}' ({reference}) not created — its picklist '{label}' wasn't found")
                 continue
             payload = {
                 "name": name,
                 "referenceName": reference,
-                "type": "String",
+                "type": "integer" if picklist_type == "picklistinteger" else "String",
                 "isPicklist": True,
                 "isPicklistSuggested": is_multi,
                 "picklistId": picklist_id,
@@ -515,16 +572,18 @@ def _already_exists(exc: AdoError) -> bool:
 
 
 def _find_picklist_ids(client: AdoClient, names: list[str]) -> dict[str, str]:
-    """IDs of picklists by name, re-reading a few times: a list created moments ago can be missing."""
+    """IDs of picklists by casefolded name, re-reading a few times: a list created moments ago can be missing."""
+    wanted = {name.casefold() for name in names}
     found: dict[str, str] = {}
     for attempt in range(PICKLIST_LOOKUP_ATTEMPTS):
         if attempt:
             time.sleep(PICKLIST_LOOKUP_DELAY_S)
         data = client.get("/_apis/work/processes/lists", api_version="7.1") or {}
         for item in data.get("value") or []:
-            if item.get("name") in names and item.get("id"):
-                found[item["name"]] = item["id"]
-        if len(found) == len(set(names)):
+            key = str(item.get("name") or "").casefold()
+            if key in wanted and item.get("id"):
+                found[key] = item["id"]
+        if len(found) == len(wanted):
             break
     return found
 

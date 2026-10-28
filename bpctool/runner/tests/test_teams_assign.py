@@ -8,7 +8,13 @@ import pytest
 
 from app.ado_client import AdoError
 from app.writers.process import StepSetupError
-from app.writers.teams import _assign_team_areas, _format_area_path, apply_teams
+from app.writers.teams import (
+    _assign_team_areas,
+    _format_area_path,
+    apply_teams,
+    strip_project_prefix,
+    workbook_teams,
+)
 
 
 class FakeClient:
@@ -130,7 +136,7 @@ def test_apply_teams_nests_areas_under_root_area_path() -> None:
         "counts": {"teams": 1, "area_paths": 1},
         "project": {
             "teams": [{"name": "Accounting"}],
-            "area_paths": [{"path": "MSBPCProj\\Finance", "team": "Accounting"}],
+            "area_paths": [{"path": "Finance", "team": "Accounting"}],
         },
     }
     apply_teams(client, ir, dry_run=False, emit=lambda *_: None, root_area_path="MSBPCProj\\Imported")
@@ -316,3 +322,55 @@ def test_team_that_already_exists_still_gets_its_areas() -> None:
     stats = apply_teams(client, _teams_ir(), dry_run=False, emit=lambda *_: None)
     assert stats["assignments"] == 2 and stats["warnings"] == 0
     assert sorted(p["project"] for p in client.patches) == ["MSBPCProj/Accounting", "MSBPCProj/Payroll"]
+
+
+def test_workbook_teams_adds_area_only_teams_once_ignoring_case() -> None:
+    ir = {
+        "project": {
+            "teams": [{"name": "Accounting", "bug_behavior": "off"}, {"name": "accounting"}],
+            "area_paths": [{"path": "HR", "team": "Payroll"}, {"path": "HR\\X", "team": "PAYROLL"}, {"path": "Y"}],
+        }
+    }
+    assert workbook_teams(ir) == [{"name": "Accounting", "bug_behavior": "off"}, {"name": "Payroll"}]
+
+
+def test_level_one_area_named_like_the_project_is_kept() -> None:
+    client = EmptyAreasClient()
+    ir = {
+        "targets": {"project_name": "Finance"},
+        "counts": {"teams": 1, "area_paths": 1},
+        "project": {"teams": [{"name": "AP"}], "area_paths": [{"path": "Finance\\AP", "team": "AP"}]},
+    }
+    apply_teams(client, ir, dry_run=False, emit=lambda *_: None)
+    assert client.created_areas == [
+        ("/_apis/wit/classificationnodes/Areas", "Finance"),
+        ("/_apis/wit/classificationnodes/Areas/Finance", "AP"),
+    ]
+    assert client.patches[0]["body"]["defaultValue"] == "Finance\\Finance\\AP"
+
+
+def test_root_area_path_drops_only_one_leading_project_segment() -> None:
+    assert strip_project_prefix("Finance\\Finance\\Imported", "finance") == ["Finance", "Imported"]
+    assert strip_project_prefix("Imported", "Finance") == ["Imported"]
+    assert strip_project_prefix("Finance", "Finance") == []
+
+
+class UnreadableTreeClient(EmptyAreasClient):
+    """The whole-tree read fails, and one per-node check is refused."""
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        if "?$depth=" in path:
+            raise AdoError("ADO 500 Internal Server Error", status=500)
+        if path.endswith("/Areas/HR"):
+            raise AdoError("ADO 403 Forbidden: no permission", status=403)
+        return super().get(path, **kwargs)
+
+
+def test_area_check_that_errors_fails_the_step_after_the_rest() -> None:
+    client = UnreadableTreeClient()
+    with pytest.raises(StepSetupError) as caught:
+        apply_teams(client, _teams_ir(), dry_run=False, emit=lambda *_: None)
+    message = str(caught.value)
+    assert "Teams step: 1 change(s)" in message and "area 'HR' couldn't be checked" in message and "403" in message
+    assert [name for _, name in client.created_areas] == ["Functional areas", "Finance", "Payables"]
+    assert [p["project"] for p in client.patches] == ["MSBPCProj/Accounting"]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
+import ssl
 
 import pytest
 
@@ -106,6 +108,130 @@ def test_create_retries_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert client.create_work_item("Demo", "Scenario", {"System.Title": "x"}) == {"id": 42}
     assert calls == ["PATCH", "PATCH"]
+
+
+def test_create_503_without_rate_limit_headers_is_outcome_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, calls = _client(monkeypatch, [(503, "Service Unavailable", {}, b"gateway timeout")])
+    with pytest.raises(AdoError) as info:
+        client.create_work_item("Demo", "Scenario", {"System.Title": "x"})
+    assert info.value.status == 503
+    assert info.value.transient is True
+    assert info.value.outcome_unknown is True
+    assert calls == ["PATCH"]
+
+
+@pytest.mark.parametrize(
+    "headers", [{"Retry-After": "1"}, {"X-RateLimit-Resource": "WorkItemTracking"}]
+)
+def test_create_503_with_rate_limit_headers_is_retried(
+    monkeypatch: pytest.MonkeyPatch, headers: dict
+) -> None:
+    client, calls = _client(
+        monkeypatch,
+        [(503, "Service Unavailable", headers, b""), (200, "OK", None, b'{"id": 42}')],
+    )
+    assert client.create_work_item("Demo", "Scenario", {"System.Title": "x"}) == {"id": 42}
+    assert calls == ["PATCH", "PATCH"]
+
+
+def test_get_503_without_headers_is_still_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, calls = _client(
+        monkeypatch, [(503, "Service Unavailable", None, b""), (200, "OK", None, b"{}")]
+    )
+    assert client.get("/_apis/projects") == {}
+    assert calls == ["GET", "GET"]
+
+
+@pytest.mark.parametrize("idempotent", [True, False])
+def test_non_json_success_body_is_a_transient_ado_error(
+    monkeypatch: pytest.MonkeyPatch, idempotent: bool
+) -> None:
+    client, calls = _client(monkeypatch, [(200, "OK", None, b"<html>proxy login</html>" * 10)])
+    with pytest.raises(AdoError) as info:
+        client.request("POST", "/_apis/x", json_body={}, idempotent=idempotent)
+    assert info.value.transient is True
+    assert info.value.outcome_unknown is (not idempotent)
+    assert "isn't JSON" in str(info.value) and "200" in str(info.value)
+    assert len(str(info.value)) < 250
+    assert calls == ["POST"]
+
+
+class _FakeResponse:
+    status = 200
+    reason = "OK"
+    will_close = False
+
+    def read(self) -> bytes:
+        return b'{"id": 42}'
+
+    def getheader(self, _name: str) -> None:
+        return None
+
+
+class _FakeConn:
+    def __init__(self, connect_error: Exception | None = None, send_error: Exception | None = None):
+        self.sock = None
+        self.connect_error = connect_error
+        self.send_error = send_error
+        self.sent: list[str] = []
+
+    def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.sock = object()
+
+    def request(self, method, target, body=None, headers=None) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(method)
+
+    def getresponse(self) -> _FakeResponse:
+        return _FakeResponse()
+
+    def close(self) -> None:
+        pass
+
+
+def _client_with_conns(monkeypatch: pytest.MonkeyPatch, conns: list[_FakeConn]) -> AdoClient:
+    client = AdoClient("https://dev.azure.com/contoso", PAT)
+    monkeypatch.setattr(client._pool, "get", lambda _scheme, _netloc: (conns.pop(0), None))
+    return client
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionRefusedError("refused"),
+        socket.gaierror(8, "nodename nor servname provided"),
+        ssl.SSLError("handshake failed"),
+    ],
+)
+def test_create_retries_a_failure_to_connect(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    good = _FakeConn()
+    client = _client_with_conns(monkeypatch, [_FakeConn(connect_error=error), good])
+    assert client.create_work_item("Demo", "Scenario", {"System.Title": "x"}) == {"id": 42}
+    assert good.sent == ["PATCH"]
+
+
+def test_create_connect_failure_on_every_attempt_is_not_outcome_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conns = [_FakeConn(connect_error=ConnectionRefusedError("refused")) for _ in range(5)]
+    client = _client_with_conns(monkeypatch, conns)
+    with pytest.raises(AdoError) as info:
+        client.create_work_item("Demo", "Scenario", {"System.Title": "x"})
+    assert info.value.outcome_unknown is False
+    assert "couldn't connect" in str(info.value)
+    assert conns == []
+
+
+def test_create_error_after_connecting_is_outcome_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    conns = [_FakeConn(send_error=ConnectionResetError("reset")), _FakeConn()]
+    client = _client_with_conns(monkeypatch, conns)
+    with pytest.raises(AdoError) as info:
+        client.create_work_item("Demo", "Scenario", {"System.Title": "x"})
+    assert info.value.outcome_unknown is True
+    assert len(conns) == 1
 
 
 def test_203_sign_in_page_is_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:

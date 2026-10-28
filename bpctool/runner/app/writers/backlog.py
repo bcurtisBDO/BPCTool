@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from ..ado_client import AdoClient, AdoError
 from .process import index_process_wits, resolve_process_wit, step_failure
+from .teams import PROJECT_NAME_PLACEHOLDER, strip_project_prefix, workbook_teams
 
 Emit = Callable[[str, str], None]
 
@@ -54,6 +55,7 @@ def apply_backlog(
     )
 
     if dry_run:
+        team_count = len(workbook_teams(ir))
         process_part = (
             f"configure {ir['counts']['backlogs']} backlog levels "
             f"(rename/create from Backlogs sheet), assign {enabled_wit_backlogs} WITs, "
@@ -64,14 +66,14 @@ def apply_backlog(
             "backlog",
             f"[dry-run] Would {process_part}"
             f"create {ir['counts']['iteration_paths']} iterations, and assign iterations "
-            f"to {ir['counts']['teams']} teams. No Azure DevOps teamsettings changes.",
+            f"to {team_count} teams. No Azure DevOps teamsettings changes.",
         )
         return {
             **stats,
             "behaviors": int(ir["counts"].get("backlogs") or 0) if process_changes else 0,
             "wit_assignments": enabled_wit_backlogs if process_changes else 0,
             "iterations": int(ir["counts"].get("iteration_paths") or 0),
-            "team_settings": int(ir["counts"].get("teams") or 0),
+            "team_settings": team_count,
             "dry_run": True,
         }
 
@@ -79,7 +81,7 @@ def apply_backlog(
         process_id = process_id or client.get_process_id(process_name)
         if not process_id:
             raise AdoError(f'Process "{process_name}" not found for backlog apply.')
-        backlog_refs = _configure_backlog_levels(client, ir, process_id, stats, emit)
+        backlog_refs = _configure_backlog_levels(client, ir, process_id, stats, emit, failures=failures)
         wits = index_process_wits(client.list_process_wits(process_id))
         wit_behaviors: dict[str, list[dict[str, Any]]] = {}
         _assign_wits_to_backlogs(
@@ -145,8 +147,9 @@ def apply_backlog(
             "Backlog",
             failures,
             advice=(
-                "Catalog Import can't place items in iterations that don't exist. Check the PAT's "
-                "permissions and the iteration names on the Iteration paths sheet, then run Backlog again."
+                "Catalog Import can't place items in iterations or backlog levels that don't exist. Check "
+                "the PAT's permissions, the Backlogs sheet's Rename from values and the iteration names on "
+                "the Iteration paths sheet, then run Backlog again."
             ),
             stats=stats,
         )
@@ -169,6 +172,12 @@ TYPE_RENAME_REFS = {
 }
 BEHAVIOR_API = "7.1-preview.2"
 WIT_BEHAVIOR_API = "7.1-preview.1"
+
+
+def _known(mapping: dict[str, str], key: str) -> str | None:
+    """``mapping[key]`` ignoring case (Rename from is typed by hand)."""
+    folded = key.casefold()
+    return next((value for name, value in mapping.items() if name.casefold() == folded), None)
 
 
 def _list_behaviors(client: AdoClient, process_id: str) -> list[dict[str, Any]]:
@@ -199,12 +208,12 @@ def _find_rename_source(
     by_ref: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, str]:
     """Locate the Agile behavior that Excel Rename-from refers to."""
-    old_display = KNOWN_BEHAVIOR_RENAMES.get(rename_from, rename_from)
+    old_display = _known(KNOWN_BEHAVIOR_RENAMES, rename_from) or rename_from
     source = by_name.get(old_display) or by_name_ci.get(old_display.lower())
     if not source:
         source = by_name.get(rename_from) or by_name_ci.get(rename_from.lower())
     if not source:
-        known_ref = KNOWN_BEHAVIOR_REFS.get(rename_from)
+        known_ref = _known(KNOWN_BEHAVIOR_REFS, rename_from)
         if known_ref:
             source = by_ref.get(known_ref)
     if source:
@@ -357,6 +366,8 @@ def _configure_backlog_levels(
     process_id: str,
     stats: dict[str, Any],
     emit: Emit,
+    *,
+    failures: list[str] | None = None,
 ) -> dict[str, str]:
     """Rename/create backlog behaviors from the Backlogs sheet (reference Script 4 Part 1)."""
     existing = _list_behaviors(client, process_id)
@@ -377,15 +388,16 @@ def _configure_backlog_levels(
         backlog_type = str(backlog.get("type") or "").strip()
         color = str(backlog.get("color") or "").strip().lstrip("#") or None
         rename_from = str(backlog.get("rename_from") or "").strip() or None
+        marker = (rename_from or "").casefold()
 
         try:
             # Explicit rename: Epic → Levels, Feature → Lowest (heal duplicates too).
-            if rename_from and rename_from not in {"(new)", "(rename)"}:
+            if rename_from and marker not in {"(new)", "(rename)"}:
                 source, old_display = _find_rename_source(
                     rename_from, by_name, by_name_ci, by_ref
                 )
                 # Prefer known Agile ref even when a custom "Levels" already exists.
-                known_ref = KNOWN_BEHAVIOR_REFS.get(rename_from or "")
+                known_ref = _known(KNOWN_BEHAVIOR_REFS, rename_from)
                 if known_ref and known_ref in by_ref:
                     source = by_ref[known_ref]
                     old_display = str(source.get("name") or old_display)
@@ -420,15 +432,25 @@ def _configure_backlog_levels(
                             f"rename source '{rename_from}' not found",
                         )
                     continue
+                if backlog_type and "portfolio" not in backlog_type.lower():
+                    message = (
+                        f"backlog level '{name}' wasn't created: its Rename from '{rename_from}' isn't a "
+                        f"backlog level in the process, and only portfolio backlog levels can be created "
+                        f"(Backlog type is '{backlog_type}'). Fix Rename from on the Backlogs sheet"
+                    )
+                    emit("backlog", f"FAILED: {message}")
+                    if failures is not None:
+                        failures.append(message)
+                    continue
                 emit(
                     "backlog",
                     f"WARNING: Could not find behavior '{old_display}'/'{rename_from}' "
-                    f"to rename to '{name}'; trying create",
+                    f"to rename to '{name}'; creating '{name}' as a new portfolio backlog level instead",
                 )
                 stats["warnings"] += 1
 
             # Type-based rename: Stories → Deliverables, Tasks → Tasks
-            if rename_from == "(rename)":
+            if marker == "(rename)":
                 target_ref = TYPE_RENAME_REFS.get(backlog_type.lower())
                 source = by_ref.get(target_ref or "")
                 if target_ref and source:
@@ -475,36 +497,35 @@ def _configure_backlog_levels(
                     emit("backlog", f"Behavior '{name}' already exists (ref: {ref})")
                 continue
 
-            # Create new portfolio level: Highest, Kanban
-            if rename_from in {None, "", "(new)"}:
-                payload = {
-                    "name": name,
-                    "inherits": PORTFOLIO_PARENT_BEHAVIOR,
-                }
-                if color:
-                    payload["color"] = color
-                created = client.post(
-                    f"/_apis/work/processes/{process_id}/behaviors",
-                    json_body=payload,
-                    api_version=BEHAVIOR_API,
-                )
-                new_ref = str((created or {}).get("referenceName") or "").strip()
-                if new_ref:
-                    backlog_to_ref[name] = new_ref
-                    by_name[name] = created or {"name": name, "referenceName": new_ref}
-                    by_name_ci[name.lower()] = by_name[name]
-                    by_ref[new_ref] = by_name[name]
-                    stats["behaviors"] += 1
-                    emit("backlog", f"Created backlog behavior '{name}' ({new_ref})")
-                else:
-                    # 204/empty — refresh
-                    for item in _list_behaviors(client, process_id):
-                        if str(item.get("name") or "").strip() == name:
-                            ref = str(item.get("referenceName") or "").strip()
-                            if ref:
-                                backlog_to_ref[name] = ref
-                                stats["behaviors"] += 1
-                            break
+            # Create new portfolio level: Highest, Kanban, or a Rename from source that wasn't found
+            payload = {
+                "name": name,
+                "inherits": PORTFOLIO_PARENT_BEHAVIOR,
+            }
+            if color:
+                payload["color"] = color
+            created = client.post(
+                f"/_apis/work/processes/{process_id}/behaviors",
+                json_body=payload,
+                api_version=BEHAVIOR_API,
+            )
+            new_ref = str((created or {}).get("referenceName") or "").strip()
+            if new_ref:
+                backlog_to_ref[name] = new_ref
+                by_name[name] = created or {"name": name, "referenceName": new_ref}
+                by_name_ci[name.lower()] = by_name[name]
+                by_ref[new_ref] = by_name[name]
+                stats["behaviors"] += 1
+                emit("backlog", f"Created backlog behavior '{name}' ({new_ref})")
+            else:
+                # 204/empty — refresh
+                for item in _list_behaviors(client, process_id):
+                    if str(item.get("name") or "").strip() == name:
+                        ref = str(item.get("referenceName") or "").strip()
+                        if ref:
+                            backlog_to_ref[name] = ref
+                            stats["behaviors"] += 1
+                        break
         except AdoError as exc:
             if exc.status == 409:
                 for item in _list_behaviors(client, process_id):
@@ -752,11 +773,14 @@ def _create_iteration_nodes(
     existing = _iteration_paths(tree) if tree else None
     failed: set[str] = set()
     created = False
+    def fail(key: str, message: str) -> None:
+        failed.add(key)
+        emit("backlog", f"FAILED: {message}")
+        if failures is not None:
+            failures.append(message)
+
     for iteration in ir["project"]["iteration_paths"]:
-        path = iteration["path"]
-        parts = [p for p in path.split("\\") if p]
-        while parts and parts[0].lower() in {project.lower(), "project name"}:
-            parts = parts[1:]
+        parts = strip_project_prefix(iteration["path"], project)
         parent: list[str] = []
         for name in parts:
             current = parent + [name]
@@ -766,7 +790,11 @@ def _create_iteration_nodes(
             if existing is not None:
                 missing = key not in existing
             else:
-                missing = not _iteration_exists(client, project, current)
+                try:
+                    missing = not _iteration_exists(client, project, current)
+                except AdoError as exc:
+                    fail(key, f"iteration '{'/'.join(current)}' couldn't be checked: {exc}")
+                    break
             if missing:
                 try:
                     _create_iteration(client, project, parent, name)
@@ -774,11 +802,7 @@ def _create_iteration_nodes(
                     created = True
                 except AdoError as exc:
                     if exc.status != 409:
-                        failed.add(key)
-                        message = f"iteration '{'/'.join(current)}' couldn't be created: {exc}"
-                        emit("backlog", f"FAILED: {message}")
-                        if failures is not None:
-                            failures.append(message)
+                        fail(key, f"iteration '{'/'.join(current)}' couldn't be created: {exc}")
                         break
                 if existing is not None:
                     existing.add(key)
@@ -827,18 +851,15 @@ def _index_iteration_tree(
 
     Root GUID always comes from the tree root ``identifier`` (not a name lookup),
     so a project rename / casing mismatch cannot blank Backlog iteration.
+    ``lookup_map`` keys are casefolded paths below the root; "" is the root.
     """
     iteration_map: dict[str, str] = {}
-    _collect_iteration_ids(tree, "", iteration_map)
-
     root_id = str(tree.get("identifier") or "").strip() or None
-    if not root_id:
-        # Fallbacks if the payload omits identifier on the root object.
-        root_id = (
-            iteration_map.get(project)
-            or iteration_map.get(str(tree.get("name") or "").strip())
-            or None
-        )
+    if root_id:
+        iteration_map[""] = root_id
+    for child in tree.get("children") or []:
+        if isinstance(child, dict):
+            _collect_iteration_ids(child, "", iteration_map)
 
     # Unique non-root GUIDs for team iteration membership (never the project root —
     # TF400494: cannot create a team iteration for the top-level node).
@@ -873,10 +894,7 @@ def _collect_iteration_ids(node: dict[str, Any], parent_path: str, result: dict[
     current_path = f"{parent_path}\\{name}" if parent_path else name
     identifier = node.get("identifier")
     if identifier:
-        guid = str(identifier)
-        result[current_path] = guid
-        result[current_path.replace("\\", "/")] = guid
-        result[name] = guid
+        result.setdefault(current_path.casefold(), str(identifier))
     for child in node.get("children") or []:
         if isinstance(child, dict):
             _collect_iteration_ids(child, current_path, result)
@@ -894,7 +912,7 @@ def _configure_team_iterations(
     emit: Emit,
     workers: int = 1,
 ) -> None:
-    teams = [team for team in ir["project"]["teams"] if (team.get("name") or "").strip()]
+    teams = workbook_teams(ir)
     if not teams:
         emit("backlog", "No teams in IR; skipping team iteration assignment")
         return
@@ -956,14 +974,25 @@ def _configure_one_team(
         return stats
 
     backlog_value = (team.get("backlog_iteration") or "@currentIteration").strip()
-    if backlog_value.lower() != "@currentiteration" and not _lookup_iteration(iteration_map, backlog_value):
-        emit(
-            "backlog",
-            f"WARNING: Team '{team_name}': Backlog iteration '{backlog_value}' isn't an iteration in "
-            "the project, so the project's root iteration is used. Check the Teams sheet.",
-        )
-        stats["warnings"] += 1
-    payload = _team_settings_payload(team, settings or {}, root_id, iteration_map)
+    if backlog_value.lower() != "@currentiteration":
+        found, ambiguous = _lookup_iteration(iteration_map, backlog_value, project)
+        if ambiguous:
+            paths = {info["id"]: info["path"] for info in child_ids}
+            emit(
+                "backlog",
+                f"WARNING: Team '{team_name}': Backlog iteration '{backlog_value}' matches "
+                f"{len(ambiguous)} iterations ({', '.join(paths.get(guid, guid) for guid in ambiguous)}), "
+                "so the project's root iteration is used. Give its full path on the Teams sheet.",
+            )
+            stats["warnings"] += 1
+        elif not found:
+            emit(
+                "backlog",
+                f"WARNING: Team '{team_name}': Backlog iteration '{backlog_value}' isn't an iteration in "
+                "the project, so the project's root iteration is used. Check the Teams sheet.",
+            )
+            stats["warnings"] += 1
+    payload = _team_settings_payload(team, settings or {}, root_id, iteration_map, project=project)
     backlog_ok = not _is_unset_iteration_id(_current_backlog_id(settings or {}))
     if payload:
         try:
@@ -1018,9 +1047,27 @@ def _current_backlog_id(settings: dict[str, Any]) -> str:
     return str(backlog or "").strip()
 
 
-def _lookup_iteration(iteration_map: dict[str, str], path: str) -> str | None:
-    text = path.strip().strip("\\/")
-    return iteration_map.get(text) or iteration_map.get(text.replace("/", "\\"))
+def _lookup_iteration(iteration_map: dict[str, str], path: str, project: str = "") -> tuple[str | None, list[str]]:
+    """(GUID, matching GUIDs when a bare name is ambiguous) for a Teams-sheet iteration path.
+
+    The path may start with the project name or placeholder; a bare name (e.g. "Sprint 1")
+    is used only when exactly one iteration has it.
+    """
+    parts = [p.strip() for p in path.replace("/", "\\").split("\\") if p.strip()]
+    key = "\\".join(parts).casefold()
+    if key in iteration_map:
+        return iteration_map[key], []
+    if parts and parts[0].casefold() in {project.strip().casefold(), PROJECT_NAME_PLACEHOLDER}:
+        parts = parts[1:]
+        key = "\\".join(parts).casefold()
+        if key in iteration_map:
+            return iteration_map[key], []
+    if len(parts) != 1:
+        return None, []
+    matches = [guid for path_key, guid in iteration_map.items() if path_key.rsplit("\\", 1)[-1] == key]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
 
 
 def _is_unset_iteration_id(value: str) -> bool:
@@ -1035,6 +1082,8 @@ def _team_settings_payload(
     current: dict[str, Any],
     root_iteration_id: str | None,
     iteration_map: dict[str, str],
+    *,
+    project: str = "",
 ) -> dict[str, Any]:
     """Build PATCH body. Never set defaultIterationMacro without backlogIteration."""
     payload: dict[str, Any] = {}
@@ -1048,7 +1097,7 @@ def _team_settings_payload(
     backlog_iteration_value = (team.get("backlog_iteration") or "@currentIteration").strip()
     target_backlog_id = root_iteration_id
     if backlog_iteration_value.lower() != "@currentiteration":
-        target_backlog_id = _lookup_iteration(iteration_map, backlog_iteration_value) or root_iteration_id
+        target_backlog_id = _lookup_iteration(iteration_map, backlog_iteration_value, project)[0] or root_iteration_id
 
     current_backlog = _current_backlog_id(current)
     if _is_unset_iteration_id(current_backlog) or current_backlog != target_backlog_id:

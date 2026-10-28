@@ -11,6 +11,25 @@ from .process import step_failure
 
 Emit = Callable[[str, str], None]
 
+PROJECT_NAME_PLACEHOLDER = "project name"
+
+
+def workbook_teams(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    """Teams-sheet rows, then teams only named on the Area paths sheet; one per name ignoring case.
+
+    Area-only teams have just a name, so steps give them the defaults of an empty Teams-sheet row.
+    """
+    project = ir.get("project") or {}
+    teams: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    area_teams = [{"name": area.get("team")} for area in project.get("area_paths") or []]
+    for row in [*(project.get("teams") or []), *area_teams]:
+        name = (row.get("name") or "").strip()
+        if name and name.lower() not in seen:
+            teams.append({**row, "name": name})
+            seen.add(name.lower())
+    return teams
+
 
 def apply_teams(
     client: AdoClient,
@@ -25,7 +44,7 @@ def apply_teams(
     root = (root_area_path or project).strip()
 
     if dry_run:
-        planned_teams = int(ir["counts"].get("teams") or 0)
+        planned_teams = len(workbook_teams(ir))
         planned_areas = int(ir["counts"].get("area_paths") or 0)
         planned_assignments = len(
             {
@@ -59,19 +78,7 @@ def apply_teams(
         failures.append(message)
         emit("teams", f"FAILED: {message}")
 
-    # Teams from Teams sheet + any team names referenced on Area paths.
-    team_names: list[str] = []
-    seen: set[str] = set()
-    for team in ir["project"]["teams"]:
-        name = (team.get("name") or "").strip()
-        if name and name.lower() not in seen:
-            team_names.append(name)
-            seen.add(name.lower())
-    for area in ir["project"]["area_paths"]:
-        name = (area.get("team") or "").strip()
-        if name and name.lower() not in seen:
-            team_names.append(name)
-            seen.add(name.lower())
+    team_names = [team["name"] for team in workbook_teams(ir)]
 
     existing_teams: dict[str, Any] = {}
     try:
@@ -111,7 +118,7 @@ def apply_teams(
     existing_areas = _read_area_tree(client, project)
 
     # A Root area path below the project (e.g. "Proj\Imported") holds the workbook's area tree.
-    root_parts = _relative_area_parts(root, project)
+    root_parts = strip_project_prefix(root, project)
     failed_areas: set[str] = set()
     area_failed_teams: set[str] = set()
     if root_parts:
@@ -125,7 +132,9 @@ def apply_teams(
     )
 
     for area in ir["project"]["area_paths"]:
-        relative_parts = _relative_area_parts(area.get("path") or "", project)
+        # The Area paths sheet's project column isn't part of the path: a first level named
+        # like the project is a real area.
+        relative_parts = [p for p in (area.get("path") or "").split("\\") if p]
         if not relative_parts:
             continue
         parts = root_parts + relative_parts
@@ -212,12 +221,10 @@ def apply_teams(
     return stats
 
 
-def _relative_area_parts(path: str, project: str) -> list[str]:
+def strip_project_prefix(path: str, project: str) -> list[str]:
+    """Segments of a path that may start with the project (or placeholder), minus that one segment."""
     parts = [p for p in path.split("\\") if p]
-    if not parts:
-        return []
-    # Strip project root / Excel placeholder so nodes are created under the project.
-    while parts and parts[0].lower() in {project.lower(), "project name"}:
+    if parts and parts[0].lower() in {project.lower(), PROJECT_NAME_PLACEHOLDER}:
         parts = parts[1:]
     return parts
 
@@ -264,7 +271,12 @@ def _ensure_area_chain(
         if existing is not None:
             missing = key not in existing
         else:
-            missing = not _area_exists(client, project, current)
+            try:
+                missing = not _area_exists(client, project, current)
+            except AdoError as exc:
+                failed.add(key)
+                fail(f"area '{'/'.join(current)}' couldn't be checked: {exc}")
+                return
         if missing:
             try:
                 _create_area(client, project, parent, name)

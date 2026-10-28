@@ -112,6 +112,7 @@ def _text(value: Any) -> str:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"\s+")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
 
 
 def _plain(value: Any) -> str:
@@ -145,7 +146,7 @@ def _comparable(ref: str, value: Any, *, rich: bool, multi: bool, boolean: bool 
     number = _number(text)
     if number is not None:
         return number
-    if re.match(r"^\d{4}-\d{2}-\d{2}([T ]|$)", text):
+    if _DATE_RE.fullmatch(text):
         return text[:10]
     return text
 

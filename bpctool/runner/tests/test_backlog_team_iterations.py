@@ -12,6 +12,7 @@ from app.ado_client import AdoError
 from app.writers.backlog import (
     _collect_iteration_ids,
     _index_iteration_tree,
+    _lookup_iteration,
     _team_settings_payload,
     apply_backlog,
 )
@@ -104,19 +105,14 @@ class BacklogFakeClient(FakeClient):
         return super().get(path, **kwargs)
 
 
-def test_collect_iteration_ids() -> None:
+def test_collect_iteration_ids_keys_casefolded_paths() -> None:
     result: dict[str, str] = {}
     _collect_iteration_ids(
-        {
-            "name": "MSBPCProj",
-            "identifier": "root",
-            "children": [{"name": "Phase 1", "identifier": "p1", "children": []}],
-        },
+        {"name": "Phase 1", "identifier": "p1", "children": [{"name": "Sprint 1", "identifier": "s1"}]},
         "",
         result,
     )
-    assert result["MSBPCProj"] == "root"
-    assert result["MSBPCProj\\Phase 1"] == "p1"
+    assert result == {"phase 1": "p1", "phase 1\\sprint 1": "s1"}
 
 
 def test_index_uses_tree_root_identifier_not_project_name_lookup() -> None:
@@ -451,3 +447,102 @@ def test_iteration_that_cannot_be_created_fails_the_step_after_the_teams() -> No
     # The rest of the step still ran: Sprint 2 created and the team configured.
     assert any(p["body"]["name"] == "Sprint 2" for p in client.posts if "classificationnodes" in p["path"])
     assert client.team_iters["MSBPCProj/Accounting"]
+
+
+def test_area_only_teams_get_defaults_and_case_duplicates_are_configured_once() -> None:
+    ir = _backlog_ir(["Accounting", "ACCOUNTING"])
+    ir["project"]["area_paths"] = [
+        {"path": "HR", "team": "Payroll"},
+        {"path": "HR\\Benefits", "team": "Benefits"},
+        {"path": "Fin", "team": "accounting"},
+    ]
+    client = BacklogFakeClient()
+    stats = apply_backlog(client, ir, dry_run=False, emit=lambda *_: None)
+    assert sorted(client.team_iters) == ["MSBPCProj/Accounting", "MSBPCProj/Benefits", "MSBPCProj/Payroll"]
+    payroll = next(p for p in client.patches if p["project"] == "MSBPCProj/Payroll")
+    assert payroll["body"] == {
+        "bugsBehavior": "asRequirements",
+        "backlogIteration": "root-guid",
+        "defaultIterationMacro": "@CurrentIteration",
+    }
+    assert stats["team_settings"] == 3
+    assert apply_backlog(BacklogFakeClient(), ir, dry_run=True, emit=lambda *_: None)["team_settings"] == 3
+
+
+TWO_PHASE_TREE = {
+    "name": "MSBPCProj",
+    "identifier": "root-guid",
+    "children": [
+        {"name": "Phase 1", "identifier": "p1", "children": [{"name": "Sprint 1", "identifier": "p1s1"}]},
+        {"name": "Phase 2", "identifier": "p2", "children": [{"name": "Sprint 1", "identifier": "p2s1"}]},
+        {"name": "Phase 3", "identifier": "p3", "children": [{"name": "Sprint 9", "identifier": "p3s9"}]},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("msbpcproj\\phase 2\\SPRINT 1", "p2s1"),
+        ("Phase 1\\Sprint 1", "p1s1"),
+        ("Phase 1/Sprint 1", "p1s1"),
+        ("Project name\\Phase 3", "p3"),
+        ("MSBPCProj", "root-guid"),
+        ("sprint 9", "p3s9"),
+        ("Phase 9", None),
+    ],
+)
+def test_backlog_iteration_lookup_ignores_case_and_the_project_prefix(path: str, expected: str | None) -> None:
+    _root, iteration_map, _children = _index_iteration_tree(TWO_PHASE_TREE, "MSBPCProj")
+    assert _lookup_iteration(iteration_map, path, "MSBPCProj") == (expected, [])
+
+
+def test_ambiguous_bare_backlog_iteration_name_warns_and_uses_the_root() -> None:
+    client = BacklogFakeClient()
+    client.tree = TWO_PHASE_TREE
+    events: list[str] = []
+    stats = apply_backlog(client, _team_ir("Sprint 1"), dry_run=False, emit=lambda _s, m: events.append(m))
+    [patch] = [p for p in client.patches if p["path"] == "/_apis/work/teamsettings"]
+    assert patch["body"]["backlogIteration"] == "root-guid"
+    assert stats["warnings"] == 1
+    assert any(
+        "Backlog iteration 'Sprint 1' matches 2 iterations (MSBPCProj\\Phase 1\\Sprint 1, "
+        "MSBPCProj\\Phase 2\\Sprint 1)" in m
+        for m in events
+    )
+
+
+def test_iteration_paths_drop_only_one_leading_project_segment() -> None:
+    client = IterationTreeClient()
+    apply_backlog(
+        client,
+        _iterations_ir(["msbpcproj\\Phase 2", "MSBPCProj\\MSBPCProj\\Sprint 5"]),
+        dry_run=False,
+        emit=lambda *_: None,
+    )
+    created = [(p["path"], p["body"]["name"]) for p in client.posts if "classificationnodes" in p["path"]]
+    assert created == [
+        ("/_apis/wit/classificationnodes/Iterations", "Phase 2"),
+        ("/_apis/wit/classificationnodes/Iterations", "MSBPCProj"),
+        ("/_apis/wit/classificationnodes/Iterations/MSBPCProj", "Sprint 5"),
+    ]
+
+
+def test_iteration_check_that_errors_fails_the_step_after_the_rest() -> None:
+    class Client(BacklogFakeClient):
+        def get(self, path: str, **kwargs: Any) -> Any:
+            if "$depth" in path:
+                raise AdoError("ADO 500 Internal Server Error", status=500)
+            if path.endswith("/Iterations/Phase%202"):
+                raise AdoError("ADO 403 Forbidden: no permission", status=403)
+            return super().get(path, **kwargs)
+
+    client = Client()
+    with pytest.raises(StepSetupError) as caught:
+        apply_backlog(
+            client, _iterations_ir(["Phase 2\\Sprint 3", "Phase 4"]), dry_run=False, emit=lambda *_: None
+        )
+    message = str(caught.value)
+    assert "Backlog step: 1 change(s)" in message
+    assert "iteration 'Phase 2' couldn't be checked" in message and "403" in message
+    assert [p["body"]["name"] for p in client.posts if "classificationnodes" in p["path"]] == ["Phase 4"]

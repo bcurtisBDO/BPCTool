@@ -22,7 +22,9 @@ REQUEST_TIMEOUT_S = 120
 IDLE_RECONNECT_S = 60.0
 MAX_RETRY_DELAY_S = 60.0
 
-# Statuses where ADO did not process the request, so any method may be retried.
+# Statuses where ADO did not process the request, so any method may be retried. A 503
+# only counts when it carries rate-limit headers: a front door can answer 503 after a
+# backend timeout on a request that was saved.
 _REJECTED_STATUSES = {429, 503}
 # Additional statuses retried only for idempotent calls (request may have run).
 _IDEMPOTENT_RETRY_STATUSES = {500, 502, 504}
@@ -70,6 +72,10 @@ class AdoError(RuntimeError):
 
 class RunCancelled(Exception):
     """Raised at a safe checkpoint after the user cancels a job."""
+
+
+class _ConnectFailed(OSError):
+    """Opening the connection failed, so none of the request was sent."""
 
 
 def _proxy_for(scheme: str, host: str) -> Any:
@@ -318,6 +324,8 @@ class AdoClient:
         self._gate = _ThrottleGate()
         # Called with a plain-language notice when Azure DevOps starts rate limiting.
         self.on_throttle: Callable[[str], None] | None = None
+        # Called before every request; may raise to stop a step (e.g. on Cancel).
+        self.before_request: Callable[[], None] | None = None
 
     def url(self, path: str, *, project: str | None = None, api_version: str | None = None) -> str:
         version = api_version or self.api_version
@@ -347,9 +355,12 @@ class AdoClient:
         """Send a request with retries.
 
         ``idempotent=False`` (work item create) never retries after the request
-        may have reached ADO: network errors and 500/502/504 raise ``outcome_unknown``
-        and only 429/503 rejections are retried.
+        may have reached ADO: network errors once connected, 500/502/504 and a 503
+        without rate-limit headers raise ``outcome_unknown``. Failures to connect,
+        429, and 503 with rate-limit headers are retried.
         """
+        if self.before_request:
+            self.before_request()
         url = absolute_url or self.url(path, project=project, api_version=api_version)
         data = None
         headers = {
@@ -371,7 +382,7 @@ class AdoClient:
             try:
                 status, reason, rate_headers, raw = self._send(method.upper(), url, data, headers)
             except (http.client.HTTPException, OSError) as exc:
-                if not idempotent:
+                if not idempotent and not isinstance(exc, _ConnectFailed):
                     raise AdoError(
                         f"Network error talking to Azure DevOps (outcome unknown, not retried): {exc}",
                         transient=True,
@@ -402,11 +413,23 @@ class AdoClient:
             if 200 <= status < 300:
                 if not raw:
                     return None
-                return json.loads(raw.decode("utf-8"))
+                try:
+                    return json.loads(raw.decode("utf-8"))
+                except ValueError as exc:
+                    prefix = raw[:60].decode("utf-8", errors="replace")
+                    raise AdoError(
+                        f"ADO {status} {reason}: the response isn't JSON (starts {prefix!r})"
+                        + ("" if idempotent else "; outcome unknown, not retried: "
+                           "Azure DevOps may have done it anyway"),
+                        status=status,
+                        transient=True,
+                        outcome_unknown=not idempotent,
+                    ) from exc
 
             body = raw.decode("utf-8", errors="replace")[:500]
             transient = status in _REJECTED_STATUSES | _IDEMPOTENT_RETRY_STATUSES
-            if not idempotent and status in _IDEMPOTENT_RETRY_STATUSES:
+            unthrottled_503 = status == 503 and not rate_headers
+            if not idempotent and (status in _IDEMPOTENT_RETRY_STATUSES or unthrottled_503):
                 raise AdoError(
                     f"ADO {status} {reason}: {body} (outcome unknown, not retried: "
                     "Azure DevOps may have done it anyway)",
@@ -432,6 +455,12 @@ class AdoClient:
         if http_proxy_headers is not None:
             target = url
             headers = {**headers, **http_proxy_headers}
+        if conn.sock is None:
+            try:
+                conn.connect()
+            except (http.client.HTTPException, OSError) as exc:
+                self._pool.discard(parts.scheme, parts.netloc)
+                raise _ConnectFailed(f"couldn't connect: {exc}") from exc
         try:
             conn.request(method, target, body=data, headers=headers)
             response = conn.getresponse()

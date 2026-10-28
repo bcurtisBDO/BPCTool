@@ -442,7 +442,8 @@ def test_create_outcome_unknown_is_not_sent_again_when_absent(
     )
     assert client.creates == 1
     assert client.lookups == 3
-    assert sleeps == [1.0, 2.0, 3.0]
+    # Waits are slept in short slices so Cancel is noticed.
+    assert sum(sleeps) == 6.0 and max(sleeps) <= catalog_runtime.RECONCILE_POLL_S
     assert id_map == {"root": 10}
     assert stats["outcome_unknown"] == 1
     by_key = {f["key"]: f for f in failures}
@@ -602,7 +603,7 @@ def test_backfill_reports_failure_when_recheck_finds_no_parent(tmp_path: Path) -
         emit=lambda *_: None,
     )
     assert counts["failed"] == 1 and counts["linked"] == 0
-    with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8") as handle:
+    with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     assert "outcome unknown" in rows[0]["Message"]
 
@@ -655,7 +656,9 @@ def test_backfill_skips_recorded_links_and_reads_the_rest_in_one_batch(tmp_path:
     assert counts["already_linked"] == 2
     assert counts["linked"] == 1
     assert counts["conflict_existing_parent"] == 1
-    with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8") as handle:
+    raw = (tmp_path / "backfill-links-report.csv").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbfKey,")
+    with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     assert [(r["Key"], r["Status"]) for r in rows] == [
         ("a", "already_linked"),
@@ -700,7 +703,7 @@ def test_backfill_reports_missing_items_and_failed_reads(tmp_path: Path) -> None
             emit=lambda *_: None,
         )
         assert counts["failed"] == 1
-        with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8") as handle:
+        with (tmp_path / "backfill-links-report.csv").open(encoding="utf-8-sig") as handle:
             assert expected in list(csv.DictReader(handle))[0]["Message"]
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.writers.backlog import (
     _assign_wits_to_backlogs,
     _configure_backlog_levels,
@@ -248,6 +250,68 @@ def test_configure_heals_duplicate_levels_left_beside_epics() -> None:
     assert any("Renamed behavior 'Epics' → 'Levels'" in m for m in events)
     # No leftover Epics display name.
     assert all(b.get("name") != "Epics" for b in client.behaviors.values())
+
+
+def test_rename_from_and_markers_ignore_case() -> None:
+    client = BehaviorFakeClient(
+        behaviors=[
+            # Display name changed by hand; found through the known Agile reference.
+            {"name": "Big rocks", "referenceName": "Microsoft.VSTS.Agile.EpicBacklogBehavior"},
+            {"name": "Features", "referenceName": "Microsoft.VSTS.Agile.FeatureBacklogBehavior"},
+        ],
+        wits=[],
+    )
+    stats: dict[str, Any] = {"behaviors": 0, "warnings": 0}
+    backlogs = [
+        {"name": "Levels", "type": "Portfolio backlog", "rename_from": "epic"},
+        {"name": "Lowest", "type": "Portfolio backlog", "rename_from": "FEATURE"},
+        {"name": "Kanban", "type": "Portfolio backlog", "rename_from": "(New)"},
+    ]
+    refs = _configure_backlog_levels(client, {"process": {"backlogs": backlogs}}, "proc-1", stats, lambda *_: None)
+
+    assert refs["Levels"] == "Microsoft.VSTS.Agile.EpicBacklogBehavior"
+    assert refs["Lowest"] == "Microsoft.VSTS.Agile.FeatureBacklogBehavior"
+    assert refs["Kanban"] == "Custom.Kanban"
+    assert stats == {"behaviors": 3, "warnings": 0}
+
+
+def test_rename_source_that_is_missing_creates_the_portfolio_level() -> None:
+    client = BehaviorFakeClient(behaviors=[], wits=[])
+    stats: dict[str, Any] = {"behaviors": 0, "warnings": 0}
+    events: list[str] = []
+    failures: list[str] = []
+    backlogs = [{"name": "Levels", "type": "Portfolio backlog", "color": "112233", "rename_from": "Epic"}]
+    refs = _configure_backlog_levels(
+        client, {"process": {"backlogs": backlogs}}, "proc-1", stats, lambda _s, m: events.append(m), failures=failures
+    )
+
+    assert refs == {"Levels": "Custom.Levels"}
+    [post] = client.posts
+    assert post["body"] == {"name": "Levels", "inherits": "System.PortfolioBacklogBehavior", "color": "112233"}
+    assert stats == {"behaviors": 1, "warnings": 1} and failures == []
+    assert any("creating 'Levels' as a new portfolio backlog level instead" in m for m in events)
+
+
+def test_missing_rename_source_for_a_non_portfolio_level_fails_the_step() -> None:
+    from app.writers.backlog import apply_backlog
+    from app.writers.process import StepSetupError
+
+    client = BehaviorFakeClient(behaviors=[], wits=[])
+    ir = {
+        "targets": {"project_name": "Proj", "process_name": "Demo"},
+        "counts": {},
+        "process": {
+            "work_item_types": [],
+            "backlogs": [{"name": "Deliverables", "type": "Requirements backlog", "rename_from": "Stories"}],
+        },
+        "project": {"iteration_paths": [], "teams": []},
+    }
+    with pytest.raises(StepSetupError) as caught:
+        apply_backlog(client, ir, dry_run=False, emit=lambda *_: None, process_id="proc-1")
+    message = str(caught.value)
+    assert "Backlog step: 1 change(s)" in message
+    assert "backlog level 'Deliverables' wasn't created: its Rename from 'Stories'" in message
+    assert client.posts == []
 
 
 def test_assign_wits_skips_disabled_and_maps_enabled() -> None:

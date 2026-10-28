@@ -168,37 +168,6 @@ def apply_catalog(
     failures_csv_path = output_dir / "import-failures.csv"
     preview_path = output_dir / "import-preview.csv"
 
-    # Always write a preview sample showing normalized rich text.
-    with preview_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = SafeDictWriter(
-            handle,
-            fieldnames=[
-                "Key",
-                "WorkItemType",
-                "Title",
-                "DescriptionFormat",
-                "DescriptionSample",
-                "SourceFile",
-                "SourceRow",
-            ],
-        )
-        writer.writeheader()
-        for draft in drafts[:50]:
-            description = str(draft.fields.get("System.Description") or "")
-            writer.writerow(
-                {
-                    "Key": draft.key,
-                    "WorkItemType": draft.work_item_type,
-                    "Title": draft.title,
-                    "DescriptionFormat": draft.content_formats.get(
-                        "System.Description", ""
-                    ),
-                    "DescriptionSample": description[:240],
-                    "SourceFile": draft.source_file,
-                    "SourceRow": draft.source_row,
-                }
-            )
-
     with_parent = sum(1 for d in drafts if d.parent_key)
     emit(
         "catalog",
@@ -233,6 +202,8 @@ def apply_catalog(
         json.dumps({**_run_stamp(run_id), **summary}, indent=2), encoding="utf-8"
     )
     write_prevalidate_csv(pre, prevalidate_csv)
+    # After the data checks, so the sample shows rows as they will be sent.
+    _write_preview_csv(drafts, preview_path)
     placeholder_notice = project_name_notice(
         project, template_rows=0, catalog_values=catalog_placeholder_count(summary)
     )
@@ -395,6 +366,39 @@ def apply_catalog(
         + f", workers {workers}",
     )
     return stats
+
+
+def _write_preview_csv(drafts: list[Any], path: Path) -> None:
+    """First 50 drafts with their normalized rich text; utf-8-sig so Excel detects UTF-8."""
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = SafeDictWriter(
+            handle,
+            fieldnames=[
+                "Key",
+                "WorkItemType",
+                "Title",
+                "DescriptionFormat",
+                "DescriptionSample",
+                "SourceFile",
+                "SourceRow",
+            ],
+        )
+        writer.writeheader()
+        for draft in drafts[:50]:
+            description = str(draft.fields.get("System.Description") or "")
+            writer.writerow(
+                {
+                    "Key": draft.key,
+                    "WorkItemType": draft.work_item_type,
+                    "Title": draft.title,
+                    "DescriptionFormat": draft.content_formats.get(
+                        "System.Description", ""
+                    ),
+                    "DescriptionSample": description[:240],
+                    "SourceFile": draft.source_file,
+                    "SourceRow": draft.source_row,
+                }
+            )
 
 
 def _write_change_report(
@@ -573,7 +577,7 @@ def _label_lookup(mapping: TemplateMapping):
 def _live_project_context(
     client: AdoClient | None, project: str, state_wits: set[str], emit: Emit
 ) -> tuple[list[str], dict[str, list[str]] | None]:
-    """Area paths already in the project and allowed states per work item type."""
+    """Area paths already in the project (starting with the project name) and allowed states per work item type."""
     if client is None:
         return [], None
     areas: list[str] = []
@@ -584,8 +588,8 @@ def _live_project_context(
         stack = [(root, [])]
         while stack:
             node, parents = stack.pop()
-            path = [*parents, str(node.get("name") or "")] if parents or node is not root else []
-            if path:
+            path = [*parents, str(node.get("name") or (project if node is root else ""))]
+            if parents:
                 areas.append("\\".join(path))
             for child in node.get("children") or []:
                 stack.append((child, path))

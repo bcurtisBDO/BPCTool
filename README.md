@@ -164,7 +164,7 @@ Each run ends with a **results card** in the UI: a headline, a highlighted line 
 | `ado-id-map.csv`             | Catalog key → work item ID. Re-runs resume from it — keep it                                                                         |
 | `pending-state-updates.csv`  | Items created in their type's first state (e.g. Test Case Design) and then moved to the workbook's State; any not marked `done` are set by the next Catalog Import — keep it |
 | `backfill-links-report.csv`  | Parent-link backfill statuses                                                                                                        |
-| `import-preview.csv`         | Sample of the catalog rows as they will be sent                                                                                      |
+| `import-preview.csv`         | Sample of the catalog rows as they will be sent (after the data checks)                                                              |
 | `import-changes.csv`         | Rehearsal against an existing project: every difference between the workbook and the work items already there, and rows a live run would duplicate |
 | `skipped-deprecated-deleted.csv` | Catalog rows not imported because their Catalog status (or a parent row's) is Deprecated or Deleted |
 | `bpctool-target.json`        | The organization and project this folder belongs to. Another project whose name gives the same folder name gets its own `<org>_<project>-<8 characters>` folder |

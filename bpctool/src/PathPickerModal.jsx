@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { holdModalFocus, wrapTabFocus } from './modalFocus.js'
-import { runnerFetch } from './runnerApi.js'
+import { runnerErrorMessage, runnerFetch } from './runnerApi.js'
 
 async function fetchJson(url) {
   const response = await runnerFetch(url)
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
-    throw new Error(payload.detail || `Request failed (${response.status})`)
+    throw new Error(runnerErrorMessage(payload, response.status, 'Request failed'))
   }
   return payload
 }

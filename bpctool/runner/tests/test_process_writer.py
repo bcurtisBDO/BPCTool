@@ -44,6 +44,9 @@ def _ir() -> dict[str, Any]:
     }
 
 
+STATE_CATEGORIES = {"New": "Proposed", "Design": "Proposed", "Ready": "InProgress", "Closed": "Completed"}
+
+
 class FakeClient:
     def __init__(
         self,
@@ -54,7 +57,11 @@ class FakeClient:
         wits: list[dict[str, Any]] | None = None,
         states: list[str] | None = None,
         list_lag: int = 0,
+        order: str | None = None,
     ) -> None:
+        # order: None = states come back without order / category; "honour", "ignore" or
+        # "reject" = what Azure DevOps does with a new state's order.
+        self.order = order
         self.fail = fail or {}
         self.fields = fields or []
         self.lists: list[dict[str, Any]] = []
@@ -76,7 +83,14 @@ class FakeClient:
     def get(self, path: str, **_kw: Any) -> dict[str, Any]:
         if path.endswith("/states"):
             self._maybe_fail("GET", path)
-            return {"value": [{"name": name} for name in self.states]}
+            if self.order is None:
+                return {"value": [{"name": name} for name in self.states]}
+            return {
+                "value": [
+                    {"name": name, "stateCategory": STATE_CATEGORIES[name], "order": index + 1}
+                    for index, name in enumerate(self.states)
+                ]
+            }
         if path.endswith("/lists"):
             self.list_reads += 1
             visible = [item for item in self.lists if not self.hidden.get(item["name"])]
@@ -104,6 +118,13 @@ class FakeClient:
             self.lists.append({"name": json_body["name"], "id": "list-1"})
             self.hidden[json_body["name"]] = self.list_lag
             return {"name": json_body["name"], "id": "list-1"}
+        if path.endswith("/states"):
+            if "order" in json_body and self.order == "reject":
+                raise AdoError("ADO 400 Bad Request: invalid order", status=400)
+            if "order" in json_body and self.order == "honour":
+                self.states.insert(json_body["order"] - 1, json_body["name"])
+            else:
+                self.states.append(json_body["name"])
         return {"name": json_body.get("name"), "referenceName": json_body.get("referenceName")}
 
     def patch(self, path: str, **_kw: Any) -> dict[str, Any]:
@@ -315,6 +336,30 @@ def test_process_adds_new_state_to_test_case() -> None:
     assert any("Added state 'New' (Proposed) to 'Test case'" in m for m in messages)
 
 
+def test_new_state_is_placed_first_so_test_cases_start_in_it() -> None:
+    client = FakeClient(wits=[TEST_CASE_LOCAL], order="honour")
+    result, _ = _run(client, _ir_with_test_case())
+    assert _state_posts(client) == [{"name": "New", "color": "b2b2b2", "stateCategory": "Proposed", "order": 1}]
+    assert client.states == ["New", "Design", "Ready", "Closed"]
+    assert result["states_added"] == 1 and result["warnings"] == 0
+
+
+def test_new_state_azure_devops_did_not_place_first_is_a_warning() -> None:
+    client = FakeClient(wits=[TEST_CASE_LOCAL], order="ignore")
+    result, messages = _run(client, _ir_with_test_case())
+    assert result["states_added"] == 1 and result["warnings"] == 1
+    assert any("'Design' is still its first state" in m and "move 'New' up" in m for m in messages)
+
+
+def test_refused_order_still_adds_the_state() -> None:
+    client = FakeClient(wits=[TEST_CASE_LOCAL], order="reject")
+    result, messages = _run(client, _ir_with_test_case())
+    assert [body.get("order") for body in _state_posts(client)] == [1, None]
+    assert client.states == ["Design", "Ready", "Closed", "New"]
+    assert result["states_added"] == 1 and result["warnings"] == 1
+    assert any("not placed first: ADO 400" in m for m in messages)
+
+
 def test_state_goes_to_the_process_copy_when_the_system_entry_shares_its_name() -> None:
     system = {"name": "Test Case", "referenceName": TEST_CASE_REFERENCE, "customization": "system"}
     local = {**TEST_CASE_LOCAL, "inherits": TEST_CASE_REFERENCE}
@@ -458,3 +503,60 @@ def test_picklist_with_unknown_outcome_that_was_not_created_fails_its_field(monk
     )
     with pytest.raises(ProcessSetupError, match="picklist 'Industry' wasn't found"):
         _run(client, _ir())
+
+
+def _list_posts(client: FakeClient) -> list[dict[str, Any]]:
+    return [body for path, body in client.sent if path.endswith("/lists")]
+
+
+def test_integer_picklist_creates_an_integer_list_and_field_whatever_the_type_casing() -> None:
+    ir = _ir()
+    ir["process"]["picklists"]["Severity"] = ["1", "2", "3"]
+    ir["process"]["fields"][0]["field_type"] = "pickliststring"
+    ir["process"]["fields"].append(
+        {
+            "custom_field": True,
+            "reference_name": "Custom.Severity",
+            "field_type": "picklistInteger",
+            "label": "Severity",
+            "field_name": "Severity",
+        }
+    )
+    client = FakeClient()
+    result, _ = _run(client, ir)
+    assert result["fields_created"] == 2
+    lists = {body["name"]: body for body in _list_posts(client)}
+    assert lists["Industry"]["type"] == "String" and lists["Severity"]["type"] == "Integer"
+    assert lists["Severity"]["items"] == ["1", "2", "3"]
+    fields = {body["referenceName"]: body for body in _field_posts(client)}
+    assert fields["Custom.Industry"]["type"] == "String" and fields["Custom.Industry"]["isPicklist"]
+    assert fields["Custom.Severity"]["type"] == "integer" and fields["Custom.Severity"]["isPicklist"]
+
+
+def test_existing_picklist_differing_only_in_case_is_updated_not_duplicated() -> None:
+    class RecordingPuts(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.puts: list[str] = []
+
+        def put(self, path: str, **kw: Any) -> dict[str, Any]:
+            self.puts.append(path)
+            return super().put(path, **kw)
+
+    client = RecordingPuts()
+    client.lists.append({"name": "industry", "id": "list-3"})
+    result, _ = _run(client, _ir())
+    assert _list_posts(client) == []
+    assert client.puts == ["/_apis/work/processes/lists/list-3"]
+    assert _field_posts(client)[0]["picklistId"] == "list-3"
+    assert result["fields_created"] == 1
+
+
+def test_picklist_found_after_409_matches_its_name_ignoring_case(monkeypatch) -> None:
+    monkeypatch.setattr(process_writer.time, "sleep", lambda _s: None)
+    client = FakeClient(fail={"POST lists": AdoError("409 Conflict: already exists", status=409)})
+    client.lists.append({"name": "INDUSTRY", "id": "list-8"})
+    client.hidden["INDUSTRY"] = 1
+    result, _ = _run(client, _ir())
+    assert result["fields_created"] == 1
+    assert _field_posts(client)[0]["picklistId"] == "list-8"

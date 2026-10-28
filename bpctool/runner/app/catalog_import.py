@@ -139,9 +139,10 @@ def _drafts_from_workbook(
     headers = [_cell(v) for v in rows[header_idx]]
     drafts: list[WorkItemDraft] = []
     for offset, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
-        values = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-        if not any(v not in (None, "") for v in values.values()):
+        # Same blank-row rule as the catalog row counts in excel_ir.
+        if not any(_cell(v) for v in row):
             continue
+        values = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
         values["_source_file"] = path.name
         values["_source_sheet"] = sheet_name
         values["_source_row"] = offset
@@ -385,7 +386,7 @@ def _fill_title_hierarchy_parents(drafts: list[WorkItemDraft]) -> None:
 
 def _first_value(lookup: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
-        value = lookup.get(normalize(key))
-        if value not in (None, ""):
-            return str(value).strip()
+        text = _cell(lookup.get(normalize(key)))
+        if text:
+            return text
     return None

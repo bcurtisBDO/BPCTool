@@ -323,7 +323,7 @@ def _ir_with_areas() -> dict:
     ir["project"] = {
         "area_paths": [
             {"path": "Business process catalog\\Acquire to dispose"},
-            {"path": "Project name\\Functional areas\\Finance"},
+            {"path": "Functional areas\\Finance"},
         ]
     }
     return ir
@@ -404,6 +404,15 @@ def test_area_path_from_another_project_is_rewritten() -> None:
     result = prevalidate_catalog_drafts([draft], _ir_with_areas(), _mapping())
     assert draft.fields["System.AreaPath"] == "NewProj\\Business process catalog\\Acquire to dispose"
     assert result.counts == {"area_path_project_renamed": 1}
+
+
+def test_level_one_area_named_like_the_project_is_kept() -> None:
+    ir = _ir_with_areas()
+    ir["project"]["area_paths"].append({"path": "NewProj\\AP"})
+    draft = _draft("a", **{"System.AreaPath": "NewProj\\NewProj\\AP"})
+    result = prevalidate_catalog_drafts([draft], ir, _mapping())
+    assert draft.fields["System.AreaPath"] == "NewProj\\NewProj\\AP"
+    assert not result.issues
 
 
 def test_area_path_ancestor_and_project_root_are_valid() -> None:
