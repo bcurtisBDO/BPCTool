@@ -173,6 +173,31 @@ def test_backfill_rows_that_fail_part_way_are_all_rolled_back(
     assert any("couldn't record 1 confirmed parent link(s)" in e for e in events)
 
 
+@pytest.mark.parametrize("stalled", [0, None])
+def test_a_write_that_makes_no_progress_fails_and_rolls_back(tmp_path: Path, stalled) -> None:
+    path = tmp_path / "ado-id-map.csv"
+    path.write_bytes(b"Key,WorkItemId\r\n")
+    handle, writer = catalog_runtime._open_csv_for_append(path, ["Key", "WorkItemId"], ("Key",))
+    real = handle._raw
+    calls = {"n": 0}
+
+    class StallingFile:
+        def write(self, data):
+            calls["n"] += 1
+            return real.write(bytes(data[:3])) if calls["n"] == 1 else stalled
+
+        def __getattr__(self, name: str):
+            return getattr(real, name)
+
+    handle._raw = StallingFile()
+    writer.writerow({"Key": "k1", "WorkItemId": 12345})
+    with pytest.raises(OSError, match="No bytes written"):
+        handle.flush()
+    handle.close()
+    assert calls["n"] == 2
+    assert path.read_bytes() == b"Key,WorkItemId\r\n"
+
+
 def test_backfill_report_that_cannot_be_written_is_a_warning(tmp_path: Path) -> None:
     (tmp_path / "backfill-links-report.csv").mkdir()
     events: list[str] = []

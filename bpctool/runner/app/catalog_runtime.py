@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import errno
 import heapq
 import os
 import threading
@@ -209,7 +210,10 @@ class _RollbackAppender:
         try:
             view = memoryview(data)
             while view:
-                view = view[self._raw.write(view) or 0 :]
+                written = self._raw.write(view)
+                if not written:
+                    raise OSError(errno.EIO, "No bytes written")
+                view = view[written:]
         except OSError:
             try:
                 self._raw.truncate(start)
