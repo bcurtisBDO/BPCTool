@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .ado_client import WORK_ITEM_BATCH_LIMIT, AdoClient, AdoError, parent_id_from_relations
-from .catalog_import import WorkItemDraft
+from .catalog_import import CATALOG_ID_HEADERS, WorkItemDraft, catalog_id_values
 from .csv_safe import SafeDictWriter
 
 Emit = Callable[[str, str], None]
@@ -34,6 +34,7 @@ ID_MAP_FIELDS = [
     "Title",
     "ParentKey",
     "ParentId",
+    *CATALOG_ID_HEADERS,
 ]
 
 # Field set on every draft (defaults to the row key) and used to find a work
@@ -48,7 +49,7 @@ TEXT_PROGRESS_EVERY = 500
 STATE_FIELD_REF = "System.State"
 STATE_NOT_SET_EXAMPLES = 5
 PENDING_STATES_CSV = "pending-state-updates.csv"
-PENDING_STATE_FIELDS = ["Key", "WorkItemId", "WorkItemType", "State", "Status", "Message"]
+PENDING_STATE_FIELDS = ["Key", "WorkItemId", "WorkItemType", "State", "Status", "Message", *CATALOG_ID_HEADERS]
 STATE_MOVE_DONE = "done"
 STATE_BATCH_SIZE = WORK_ITEM_BATCH_LIMIT
 # Relations come with every field (Azure DevOps won't narrow an expanded read), so
@@ -64,6 +65,7 @@ BACKFILL_REPORT_FIELDS = [
     "Title",
     "Status",
     "Message",
+    *CATALOG_ID_HEADERS,
 ]
 
 
@@ -227,6 +229,7 @@ def append_id_map_row(
         "Title": draft.title,
         "ParentKey": draft.parent_key or "",
         "ParentId": parent_id or "",
+        **catalog_id_values(draft),
     }
 
     def _write() -> None:
@@ -636,6 +639,8 @@ class _StateMove:
     state: str
     source_file: str = ""
     source_row: int | str = ""
+    # (CSV header, value) pairs for the log's catalog columns.
+    catalog_ids: tuple[tuple[str, str], ...] = ()
 
 
 class StateAfterCreate:
@@ -718,6 +723,11 @@ class StateAfterCreate:
                     state,
                     draft.source_file if draft else "",
                     draft.source_row if draft else "",
+                    tuple(
+                        catalog_id_values(draft).items()
+                        if draft
+                        else ((header, str(row.get(header) or "")) for header in CATALOG_ID_HEADERS)
+                    ),
                 )
             )
         if moves:
@@ -734,7 +744,13 @@ class StateAfterCreate:
 
     def defer(self, draft: WorkItemDraft, work_item_id: int, state: str) -> None:
         move = _StateMove(
-            draft.key, work_item_id, draft.work_item_type, state, draft.source_file, draft.source_row
+            draft.key,
+            work_item_id,
+            draft.work_item_type,
+            state,
+            draft.source_file,
+            draft.source_row,
+            tuple(catalog_id_values(draft).items()),
         )
         with self._lock:
             self._log_locked(move, "pending", "")
@@ -837,6 +853,7 @@ class StateAfterCreate:
                     "State": move.state,
                     "Status": status,
                     "Message": message,
+                    **dict(move.catalog_ids),
                 }
             )
             self._log_handle.flush()
@@ -1091,6 +1108,7 @@ def _record_confirmed_parents(id_map_path: Path, rows: list[dict[str, Any]]) -> 
                     "Title": row["Title"],
                     "ParentKey": row["Parent Key"],
                     "ParentId": row["Parent ADO ID"],
+                    **{header: row.get(header, "") for header in CATALOG_ID_HEADERS},
                 }
             )
     finally:
@@ -1157,6 +1175,7 @@ def backfill_parent_links(
             "Title": draft.title,
             "Status": "planned",
             "Message": "",
+            **catalog_id_values(draft),
         }
         if recorded.get(draft.key) == expected_parent_id:
             row["Status"] = "already_linked"

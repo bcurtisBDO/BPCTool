@@ -27,8 +27,11 @@ from ..catalog_match import (
     write_matched_csv,
 )
 from ..catalog_import import (
+    CATALOG_ID_HEADERS,
     SKIPPED_RETIRED_CSV,
     SkippedDraft,
+    catalog_id_values,
+    catalog_ids_by_key,
     is_retired,
     load_catalog_drafts,
     split_retired_drafts,
@@ -201,7 +204,7 @@ def apply_catalog(
     prevalidate_path.write_text(
         json.dumps({**_run_stamp(run_id), **summary}, indent=2), encoding="utf-8"
     )
-    write_prevalidate_csv(pre, prevalidate_csv)
+    write_prevalidate_csv(pre, prevalidate_csv, catalog_ids=catalog_ids_by_key(drafts))
     # After the data checks, so the sample shows rows as they will be sent.
     _write_preview_csv(drafts, preview_path)
     placeholder_notice = project_name_notice(
@@ -323,7 +326,7 @@ def apply_catalog(
         ),
         encoding="utf-8",
     )
-    write_failures_csv(failures, failures_csv_path)
+    write_failures_csv(failures, failures_csv_path, catalog_ids=catalog_ids_by_key(drafts))
     if failures:
         emit(
             "catalog",
@@ -381,6 +384,7 @@ def _write_preview_csv(drafts: list[Any], path: Path) -> None:
                 "DescriptionSample",
                 "SourceFile",
                 "SourceRow",
+                *CATALOG_ID_HEADERS,
             ],
         )
         writer.writeheader()
@@ -397,6 +401,7 @@ def _write_preview_csv(drafts: list[Any], path: Path) -> None:
                     "DescriptionSample": description[:240],
                     "SourceFile": draft.source_file,
                     "SourceRow": draft.source_row,
+                    **catalog_id_values(draft),
                 }
             )
 
@@ -507,7 +512,13 @@ def _write_change_report(
     )
     if not complete_workbook:
         summary["partialWorkbook"] = True
-    write_changes_csv(changes, csv_path)
+    # Rows no longer in the workbook keep the values ado-id-map.csv recorded for them.
+    catalog_ids = {
+        str(row.get("Key") or "").strip(): {header: row.get(header) or "" for header in CATALOG_ID_HEADERS}
+        for row in id_map_rows
+    }
+    catalog_ids.update(catalog_ids_by_key([*retired, *drafts]))
+    write_changes_csv(changes, csv_path, catalog_ids=catalog_ids)
     json_path.write_text(json.dumps({**_run_stamp(run_id), **summary}, indent=2), encoding="utf-8")
     reused = by_kind["exists_not_in_id_map"] + by_kind["matched_other_key"]
     emit(

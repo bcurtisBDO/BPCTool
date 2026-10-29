@@ -162,13 +162,15 @@ def test_csv_opens_in_excel_with_plain_columns(tmp_path) -> None:
     reader = FakeReader({1: {"System.Title": "Old", "System.WorkItemType": "Process"}})
     changes = _compare(reader, [_draft("A", {"System.Title": "New"})], _id_map(("A", 1)))
     path = tmp_path / "changes.csv"
-    write_changes_csv(changes, path)
+    write_changes_csv(changes, path, catalog_ids={"A": {"Microsoft ID MS BPC": "MS-A", "Mavim ID MS BPC": "M-1"}})
     assert path.read_bytes().startswith(b"\xef\xbb\xbf")
     rows = list(csv.DictReader(path.open(encoding="utf-8-sig")))
     assert rows == [{
         "Change": "Field value differs", "Key": "A", "Work item ID": "1", "Work item type": "Process",
         "Title": "New", "Field": "Title", "Value in Azure DevOps": "Old", "Value in workbook": "New",
         "Usually edited in": "Workbook", "Source file": "bpc.xlsx", "Source row": "7",
+        "Catalog status MS BPC": "", "Microsoft ID MS BPC": "MS-A", "Mavim ID MS BPC": "M-1",
+        "Mavim reference MS BPC": "", "Partner ID MS BPC": "",
     }]
 
 

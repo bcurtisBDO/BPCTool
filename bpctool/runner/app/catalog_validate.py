@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from .catalog_import import WorkItemDraft
+from .catalog_import import CATALOG_ID_HEADERS, WorkItemDraft
 from .csv_safe import SafeWriter
 from .excel_ir import replace_project_placeholder
 from .mapping import TemplateMapping, normalize
@@ -801,11 +801,21 @@ PREVALIDATE_CSV_COLUMNS = [
     "Value used",
     "Details",
     "How to fix",
+    *CATALOG_ID_HEADERS,
 ]
 
 
-def write_prevalidate_csv(result: PrevalidateResult, path: Path) -> int:
-    """Every check result, review items first — opens directly in Excel."""
+def write_prevalidate_csv(
+    result: PrevalidateResult,
+    path: Path,
+    *,
+    catalog_ids: Mapping[str, Mapping[str, str]] | None = None,
+) -> int:
+    """Every check result, review items first — opens directly in Excel.
+
+    ``catalog_ids``: row key → the catalog columns to add (see ``catalog_ids_by_key``).
+    """
+    ids = catalog_ids or {}
     order = {kind: index for index, kind in enumerate(REVIEW_KINDS + AUTOMATIC_FIX_KINDS)}
     rows = sorted(
         result.issues,
@@ -830,6 +840,7 @@ def write_prevalidate_csv(result: PrevalidateResult, path: Path) -> int:
                     issue.new_value,
                     issue.detail,
                     text.get("fix", ""),
+                    *(ids.get(issue.key, {}).get(header, "") for header in CATALOG_ID_HEADERS),
                 ]
             )
     return len(rows)
