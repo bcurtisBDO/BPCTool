@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import heapq
+import os
 import threading
 import time
 from collections import defaultdict
@@ -19,7 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .ado_client import WORK_ITEM_BATCH_LIMIT, AdoClient, AdoError, parent_id_from_relations
+from .ado_client import (
+    WORK_ITEM_BATCH_LIMIT,
+    AdoClient,
+    AdoError,
+    RunCancelled,
+    parent_id_from_relations,
+)
 from .catalog_import import CATALOG_ID_HEADERS, WorkItemDraft, catalog_id_values
 from .csv_safe import SafeDictWriter
 
@@ -180,6 +187,49 @@ def open_id_map_for_append(path: Path) -> tuple[Any, csv.DictWriter]:
     return _open_csv_for_append(path, ID_MAP_FIELDS, ("Key", "WorkItemId"))
 
 
+class _RollbackAppender:
+    """Text sink for csv.DictWriter: each flush() appends what was written since the last one,
+    or nothing. On a write error the file is truncated back, so it never ends in a cut-off row
+    (a cut-off WorkItemId would still parse, as the wrong work item)."""
+
+    def __init__(self, path: Path) -> None:
+        self._raw = path.open("ab", buffering=0)
+        self._pending: list[str] = []
+
+    def write(self, text: str) -> int:
+        self._pending.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        data = "".join(self._pending).encode("utf-8")
+        self._pending.clear()
+        start = os.fstat(self._raw.fileno()).st_size
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[self._raw.write(view) or 0 :]
+        except OSError:
+            try:
+                self._raw.truncate(start)
+            except OSError:
+                pass
+            raise
+
+    def close(self) -> None:
+        try:
+            self.flush()
+        finally:
+            self._raw.close()
+
+    def __enter__(self) -> _RollbackAppender:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
 def _open_csv_for_append(
     path: Path, fields: list[str], required: tuple[str, ...]
 ) -> tuple[Any, csv.DictWriter]:
@@ -203,13 +253,17 @@ def _open_csv_for_append(
         with path.open("rb") as existing:
             existing.seek(-1, 2)
             needs_newline = existing.read(1) not in (b"\n", b"\r")
-    handle = path.open("a", encoding="utf-8", newline="")
+    handle = _RollbackAppender(path)
     if needs_newline:
         handle.write("\r\n")
     writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
     if write_header:
         writer.writeheader()
+    try:
         handle.flush()
+    except OSError:
+        handle.close()
+        raise
     return handle, writer
 
 
@@ -400,6 +454,13 @@ def import_drafts_parent_aware(
     stats["state_not_set"] = later_state.not_set
     stats["state_not_set_examples"] = later_state.not_set_examples
     stats["state_resumed"] = later_state.resumed
+    if later_state.cancelled:
+        stats["state_cancelled"] = later_state.cancelled
+        emit(
+            "catalog",
+            f"Cancelled before {later_state.cancelled} work item(s) were moved to their State; "
+            f"the next Catalog Import moves them ({PENDING_STATES_CSV})",
+        )
     if later_state.log_error:
         stats["state_log_error"] = later_state.log_error
         emit(
@@ -495,7 +556,8 @@ def _create_drafts(
     def record(draft: WorkItemDraft, work_item_id: int, parent_id: int | None) -> None:
         claims.add(work_item_id)
         with lock:
-            # After a failed write the file may end in a partial row, so stop writing to it.
+            # A failed write is rolled back, but the cause (disk full, file locked) usually
+            # persists, so stop writing to the map.
             if not write_errors:
                 try:
                     append_id_map_row(writer, handle, draft, work_item_id, parent_id)
@@ -506,6 +568,8 @@ def _create_drafts(
 
     in_flight: dict[Future, WorkItemDraft] = {}
     reconcile_cancelled: set[str] = set()
+    # Cancelled while waiting to send (throttle pause / retry wait): not created.
+    not_sent: set[str] = set()
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             while True:
@@ -534,6 +598,8 @@ def _create_drafts(
                     except ReconcileCancelled:
                         reconcile_cancelled.add(draft.key)
                         stats["cancelled"] += 1
+                    except RunCancelled:
+                        not_sent.add(draft.key)
                     except Exception as exc:  # noqa: BLE001 - the other completed rows must still be handled
                         stats["failed"] += 1
                         if getattr(exc, "outcome_unknown", False):
@@ -571,9 +637,11 @@ def _create_drafts(
     leftover = queue.remaining()
     stopped = cancel() or bool(write_errors)
     cancelled_keys = (
-        _blocked_only_by_unstarted(leftover, id_map, reconcile_cancelled) if stopped else set()
+        _blocked_only_by_unstarted(leftover, id_map, reconcile_cancelled | not_sent)
+        if stopped
+        else set()
     )
-    not_started = 0
+    not_started = len(not_sent)
     for draft in leftover:
         if draft.key in cancelled_keys:
             not_started += 1
@@ -677,6 +745,8 @@ class StateAfterCreate:
         self.set_after_create = 0
         self.not_set = 0
         self.resumed = 0
+        # Not sent because the run was cancelled while waiting (still pending in the log).
+        self.cancelled = 0
         self.not_set_examples: list[dict[str, Any]] = []
         # First error writing the log; once set, nothing more is written to it this run.
         self.log_error = ""
@@ -781,6 +851,11 @@ class StateAfterCreate:
     def _send(self, batch: list[_StateMove]) -> None:
         try:
             errors = self._update(batch)
+        except RunCancelled:
+            # Still logged as pending, so the next run sends them.
+            with self._lock:
+                self.cancelled += len(batch)
+            return
         except Exception as exc:  # noqa: BLE001 - rows stay pending, so the next run sends them again
             error = f"State update failed: {str(exc) or type(exc).__name__}"
             with self._lock:
@@ -817,6 +892,8 @@ class StateAfterCreate:
                     self._project, move.work_item_id, {STATE_FIELD_REF: move.state}
                 )
                 errors.append(None)
+            except RunCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - logged as failed; the next run retries it
                 errors.append(str(exc) or type(exc).__name__)
         return errors
@@ -907,7 +984,15 @@ def _send_create(
             dry_run=False,
             markdown_format_fields=draft.markdown_format_fields,
         )
-        work_item_id = int(created["id"])
+        try:
+            work_item_id = int(created["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AdoError(
+                "Azure DevOps accepted the create but its reply has no work item ID "
+                f"({type(exc).__name__}: {exc}); outcome unknown, not retried",
+                transient=True,
+                outcome_unknown=True,
+            ) from exc
         if on_created is not None:
             on_created(work_item_id)
         return work_item_id
@@ -1009,6 +1094,12 @@ def _find_existing_after_unknown_create(
                 field_ref=RECONCILE_FIELD_REF,
                 field_value=draft.fields.get(RECONCILE_FIELD_REF),
             )
+        except RunCancelled as exc:
+            # The create may have gone through, so this isn't "not sent".
+            raise ReconcileCancelled(
+                f"{original}; run cancelled before checking whether it was created",
+                outcome_unknown=True,
+            ) from exc
         except AdoError as lookup_exc:
             raise AdoError(
                 f"{original}; couldn't check whether it was created ({lookup_exc}), so it "
@@ -1094,7 +1185,11 @@ def _ensure_parent_link(
 
 
 def _record_confirmed_parents(id_map_path: Path, rows: list[dict[str, Any]]) -> int:
-    """Append a row with ParentId per confirmed link (the map's last row per key wins)."""
+    """Append a row with ParentId per confirmed link (the map's last row per key wins).
+
+    All rows are added or, on a write error, none. Raises OSError / ValueError when the map
+    can't be opened or written.
+    """
     if not rows:
         return 0
     handle, writer = open_id_map_for_append(id_map_path)
@@ -1111,6 +1206,7 @@ def _record_confirmed_parents(id_map_path: Path, rows: list[dict[str, Any]]) -> 
                     **{header: row.get(header, "") for header in CATALOG_ID_HEADERS},
                 }
             )
+        handle.flush()
     finally:
         handle.close()
     return len(rows)
@@ -1224,7 +1320,7 @@ def backfill_parent_links(
                 batch = futures[future]
                 try:
                     results = future.result()
-                except CancelledError:
+                except (CancelledError, RunCancelled):
                     for index in batch:
                         rows[index]["Message"] = "Not checked (run cancelled)"
                     counts["cancelled"] += len(batch)
@@ -1244,7 +1340,16 @@ def backfill_parent_links(
 
     if id_map_path is not None:
         confirmed = [rows[i] for i in to_check if rows[i]["Status"] in ("already_linked", "linked")]
-        counts["newly_recorded"] = _record_confirmed_parents(id_map_path, confirmed)
+        try:
+            counts["newly_recorded"] = _record_confirmed_parents(id_map_path, confirmed)
+        except (OSError, ValueError) as exc:
+            counts["not_recorded"] = len(confirmed)
+            emit(
+                "catalog",
+                f"WARNING: couldn't record {len(confirmed)} confirmed parent link(s) in "
+                f"{id_map_path.name} ({exc}). The links are in Azure DevOps; the next Catalog "
+                "Import checks them again. Close the file in Excel if it's open.",
+            )
         if counts["newly_recorded"]:
             emit(
                 "catalog",
@@ -1253,10 +1358,14 @@ def backfill_parent_links(
             )
 
     report_path = output_dir / "backfill-links-report.csv"
-    with report_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = SafeDictWriter(handle, fieldnames=BACKFILL_REPORT_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+    try:
+        with report_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = SafeDictWriter(handle, fieldnames=BACKFILL_REPORT_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+        wrote = f"wrote {report_path.name}"
+    except OSError as exc:
+        wrote = f"WARNING: couldn't write {report_path.name} ({exc}); close it in Excel if it's open"
 
     summary = ", ".join(
         f"{k}={v}"
@@ -1265,7 +1374,6 @@ def backfill_parent_links(
     )
     emit(
         "catalog",
-        f"Parent-link backfill finished: {summary or 'no changes'}; "
-        f"wrote {report_path.name}",
+        f"Parent-link backfill finished: {summary or 'no changes'}; {wrote}",
     )
     return counts

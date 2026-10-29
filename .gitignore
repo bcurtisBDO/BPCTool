@@ -6,7 +6,8 @@
 *.sw?
 *.suo
 
-# Node / Vite (app lives in bpctool/)
+# Node / Vite (app lives in bpctool/; npm run from the repo root leaves an empty lockfile)
+/package-lock.json
 node_modules/
 dist/
 dist-ssr/
@@ -17,6 +18,7 @@ dist-ssr/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 
 # Local run artifacts
 logs/

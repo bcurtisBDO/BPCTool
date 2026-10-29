@@ -309,7 +309,7 @@ If **Rehearsal only** is ticked, steps finish quickly with `[dry-run]` log lines
 
 Tick **Rehearsal only**, click **Rehearse selected flow**, and inspect the results card and preview files (`rehearsal-summary.html`, `import-prevalidate.csv`, `import-preview.csv`) without changing Azure DevOps. If the project already exists, the rehearsal also reads its catalog work items and reports what differs from the workbook (*Changes since the last import*, `import-changes.csv`; see §11). Untick it before the live run.
 
-**Cancel:** in Runner mode, **Cancel run** asks the runner to stop the job (`POST /jobs/{id}/cancel`); the button shows **Cancelling…** until it stops. The runner stops at the next safe point: between steps, at the next Azure DevOps request or progress message inside Process/Layout/Teams/Backlog, at the next progress message inside Project, and in Catalog Import after in-flight creates finish (they are still written to `ado-id-map.csv`). State updates already queued for created items are still sent; any not confirmed stay in `pending-state-updates.csv` for the next run. Backfill is skipped; the job ends as **cancelled**. Steps that finished before the cancel are marked complete; Catalog is not, so run it again to resume. In Simulate/API modes, Cancel stops the client-side flow.
+**Cancel:** in Runner mode, **Cancel run** asks the runner to stop the job (`POST /jobs/{id}/cancel`); the button shows **Cancelling…** until it stops. The runner stops at the next safe point: between steps, at the next Azure DevOps request or progress message inside Process/Layout/Teams/Backlog, at the next progress message inside Project, and in Catalog Import after in-flight creates finish (they are still written to `ado-id-map.csv`). A request still waiting out a rate-limit pause or a retry delay stops within half a second without being sent, so Cancel doesn't wait for the pause to end. State updates already queued for created items are still sent unless they're waiting out a pause; any not confirmed stay in `pending-state-updates.csv` for the next run. Backfill is skipped; the job ends as **cancelled**. Steps that finished before the cancel are marked complete; Catalog is not, so run it again to resume. In Simulate/API modes, Cancel stops the client-side flow.
 
 **Page refresh:** if you reload the page while a Runner job is running, the UI reattaches to that job (same browser tab session) and replays its log. Restarting the runner process clears jobs, so there is nothing to reattach to.
 
@@ -513,7 +513,7 @@ Root: `<Run output folder>/<org>_<project>/` — the folder chosen in Run config
 | `ado-id-map.csv` | Live catalog import — `Key`, `WorkItemId`, …; **appended** across runs for resume (the last row for a key wins; backfill appends a row with `ParentId` for each parent link it confirms). Rewritten when a row is matched to an existing item by Microsoft ID (the item's old key is replaced by the new one) |
 | `pending-state-updates.csv` | Live catalog import, when items were created in their type's first state and then moved to their State — one `pending` row per item before the update is sent, then `done` or `failed`. Items not `done` are tried again by the next Catalog Import; keep it with `ado-id-map.csv` |
 | `matched-by-microsoft-id.csv` | Live catalog import, when rows with a new key were found in the project by Microsoft ID — reused item (with its previous key), keys created as new items because their earlier item went to another row, and rows not created because several items match. Removed when nothing matched |
-| `backfill-links-report.csv` | Parent-link backfill statuses after catalog create |
+| `backfill-links-report.csv` | Parent-link backfill statuses after catalog create. Still written when `ado-id-map.csv` can't be (e.g. open in Excel on Windows): the run log warns, and the next run checks those links again |
 | `bpctool-target.json` | The organization and project this folder belongs to, written once a run has checked the folder (see *One results folder per project* in §2). Keep it with `ado-id-map.csv` |
 | `descriptions-shortened.csv` | Live Process step that shortened or dropped a field or work item type description (see [Long field descriptions](#long-field-or-work-item-type-descriptions)): kind, name, reference name, original and sent length, text sent, full workbook text. Kept as a record when a later run shortens nothing |
 
@@ -829,7 +829,7 @@ How the runner reacts (all workers share one pause):
 |---|---|
 | `X-RateLimit-Remaining` at or below 25% of `X-RateLimit-Limit` | Spaces requests 0.5 s apart (2 s at or below 10%) for 30 s; stops once the budget recovers |
 | `X-RateLimit-Delay` (requests already delayed) | Spaces requests 2 s apart |
-| `Retry-After` on any response, including HTTP 200 | Pauses every request for that long (up to 60 s) |
+| `Retry-After` on any response, including HTTP 200 | Pauses every request for that long (up to 5 minutes; a longer request is noted in the run log) |
 | 429 / 503 | Pauses every request (`Retry-After` or jittered backoff), then retries |
 
 The run log shows *Azure DevOps is slowing this PAT's requests…* or *…rate limit nearly reached…*, at most once a minute. The run keeps going, and the email is information only.

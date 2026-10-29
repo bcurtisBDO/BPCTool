@@ -95,6 +95,7 @@ def run_apply(
     for ado in (client, change_reader):
         if ado is not None:
             ado.on_throttle = lambda message: _emit({"type": "info", "message": message})
+            ado.cancel_waits = cancel_requested
 
     output_dir = resolve_output_dir(org_url, request.project_name, request.output_root)
     default_folder_name = default_output_dir(org_url, request.project_name, request.output_root).name
